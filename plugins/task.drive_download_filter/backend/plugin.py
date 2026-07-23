@@ -4,7 +4,6 @@ import re
 from typing import Any
 
 from core.sdk import (
-    AutomationProvider,
     BasePlugin,
     HealthReport,
     OperationResult,
@@ -30,22 +29,11 @@ VIDEO_EXTENSIONS = {
     ".rm", ".3gp", ".vob", ".ogv",
 }
 
-ALL_TASK_EVENTS = [
-    "task.created",
-    "task.updated",
-    "task.started",
-    "task.completed",
-    "task.failed",
-    "task.cancelled",
-    "task.scan.completed",
-    "task.scan.started",
-]
 
-
-class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider):
+class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider):
     plugin_id = "task.drive_download_filter"
     plugin_name = "网盘下载集数过滤"
-    plugin_version = "0.2.0"
+    plugin_version = "0.3.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -53,159 +41,32 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
     def set_runtime_config(self, config: dict[str, Any]) -> None:
         self._runtime_config = dict(config or {})
 
-    # ============================================================
-    # AutomationProvider 接口
-    # ============================================================
-
-    def subscribed_events(self) -> list[str]:
-        auto_enabled = bool(self._runtime_config.get("auto_filter_enabled", True))
-        if not auto_enabled:
-            return []
-        return list(ALL_TASK_EVENTS)
-
-    def handle(self, event: dict[str, Any]) -> dict[str, Any]:
-        event_type = str(event.get("event_type") or "unknown")
-        payload = dict(event.get("payload") or {})
-
-        task_name = str(
-            payload.get("task_name")
-            or payload.get("title")
-            or payload.get("name")
-            or event.get("task_id")
-            or ""
-        ).strip()
-
-        template_name = str(payload.get("template") or payload.get("template_name") or "").strip()
-
-        task_id = str(event.get("task_id") or payload.get("task_id") or "").strip()
-
-        auto_enabled = bool(self._runtime_config.get("auto_filter_enabled", True))
-        if not auto_enabled:
-            return OperationResult(
-                success=True,
-                message="自动过滤已关闭，跳过处理。",
-                data={"event_type": event_type, "task_name": task_name},
-            ).model_dump(mode="json")
-
-        target_templates_raw = str(self._runtime_config.get("auto_filter_templates", "网盘下载任务,网盘转存任务") or "").strip()
-        target_templates = [t.strip() for t in target_templates_raw.split(",") if t.strip()]
-
-        is_target_task = False
-        for tpl in target_templates:
-            if tpl and (tpl in template_name or tpl in task_name):
-                is_target_task = True
-                break
-
-        if not is_target_task:
-            return OperationResult(
-                success=True,
-                message=f"任务「{task_name}」不属于自动过滤的模板范围，跳过。",
-                data={
-                    "event_type": event_type,
-                    "task_name": task_name,
-                    "template_name": template_name,
-                    "target_templates": target_templates,
-                },
-            ).model_dump(mode="json")
-
-        drive_items = (
-            payload.get("drive_items")
-            or payload.get("items")
-            or payload.get("scan_results")
-            or payload.get("files")
-            or []
-        )
-
-        if not isinstance(drive_items, list) or not drive_items:
-            return OperationResult(
-                success=True,
-                message=f"检测到目标任务「{task_name}」，但当前事件未携带网盘内容列表（{event_type}）。",
-                data={
-                    "event_type": event_type,
-                    "task_name": task_name,
-                    "task_id": task_id,
-                    "matched": True,
-                    "has_items": False,
-                },
-            ).model_dump(mode="json")
-
-        rule = self._match_rule(task_name)
-        filter_config = {
-            "start_episode": int(rule.get("start_episode", self._runtime_config.get("default_start_episode", 1)) or 1),
-            "end_episode": int(rule.get("end_episode", self._runtime_config.get("default_end_episode", 0)) or 0),
-            "blocked_episodes": str(rule.get("blocked_episodes", self._runtime_config.get("default_blocked_episodes", "")) or ""),
-            "blocked_item_ids": [],
-            "only_video_files": bool(self._runtime_config.get("only_video_files", True)),
-            "include_folders": bool(self._runtime_config.get("include_folders", True)),
-        }
-
-        validation = self.validate_config(filter_config)
-        if not validation.success:
-            return OperationResult(
-                success=False,
-                message=f"自动过滤配置校验失败：{validation.message}",
-                errors=validation.errors,
-                data={"event_type": event_type, "task_name": task_name},
-            ).model_dump(mode="json")
-
-        result = self._filter_items(list(drive_items), filter_config)
-
-        return OperationResult(
-            success=True,
-            message=f"已自动为任务「{task_name}」应用集数过滤：{len(drive_items)} 项 → 保留 {len(result['kept'])} 项，过滤 {len(result['filtered'])} 项。",
-            data={
-                "event_type": event_type,
-                "task_name": task_name,
-                "task_id": task_id,
-                "matched_rule": rule.get("keyword", "默认规则"),
-                "filter_config": result["config"],
-                "original_count": len(drive_items),
-                "kept_count": len(result["kept"]),
-                "filtered_count": len(result["filtered"]),
-                "kept_items": [
-                    {"id": it.get("id"), "name": it.get("name"), "episode": it.get("_episode")}
-                    for it in result["kept"]
-                ],
-                "filtered_items": [
-                    {"id": it.get("id"), "name": it.get("name"), "episode": it.get("_episode"), "reason": it.get("_filter_reason")}
-                    for it in result["filtered"]
-                ],
-            },
-        ).model_dump(mode="json")
-
-    # ============================================================
-    # 基础能力
-    # ============================================================
-
     def health(self, ctx: dict[str, Any]) -> HealthReport:
         return HealthReport(
             status="ok",
             message=f"{self.plugin_name} 运行正常。",
             details={
-                "auto_filter_enabled": bool(self._runtime_config.get("auto_filter_enabled", True)),
-                "target_templates": str(self._runtime_config.get("auto_filter_templates", "")).split(","),
-                "configured_patterns": self._get_episode_patterns(),
                 "default_start": self._runtime_config.get("default_start_episode", 1),
                 "default_end": self._runtime_config.get("default_end_episode", 0),
+                "default_latest_count": self._runtime_config.get("default_latest_count", 0),
+                "default_skip_downloaded": self._runtime_config.get("default_skip_downloaded", True),
                 "rules_count": len(self._parse_all_rules()),
-                "subscribed_events": self.subscribed_events(),
+                "configured_patterns": self._get_episode_patterns(),
             },
         )
-
-    # ============================================================
-    # TaskTypeProvider 接口
-    # ============================================================
 
     def get_template(self) -> TaskTemplate:
         default_start = int(self._runtime_config.get("default_start_episode", 1) or 1)
         default_end = int(self._runtime_config.get("default_end_episode", 0) or 0)
+        default_latest = int(self._runtime_config.get("default_latest_count", 0) or 0)
+        default_skip = bool(self._runtime_config.get("default_skip_downloaded", True))
 
         return TaskTemplate(
             type_key="drive_download_filter",
             template_key="drive_download_filter",
             plugin_id=self.plugin_id,
             title="网盘下载集数过滤",
-            description="在下载网盘内容前，根据集数范围或屏蔽列表过滤需要下载的剧集。也会自动为网盘下载/转存任务应用过滤规则。",
+            description="在下载网盘内容前，根据集数范围、最新N集或屏蔽列表过滤需要下载的剧集。支持跳过已下载的集数。",
             allow_manual_creation=True,
             supported_inputs=["manual", "resource"],
             form_schema=[
@@ -215,7 +76,7 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
                     "type": "string",
                     "required": False,
                     "default": "",
-                    "description": "当前处理的资源名称，便于识别和匹配过滤规则。",
+                    "description": "当前处理的资源名称，用于匹配过滤规则。",
                 },
                 {
                     "key": "drive_items",
@@ -235,12 +96,25 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
                     },
                 },
                 {
+                    "key": "filter_mode",
+                    "label": "过滤模式",
+                    "type": "select",
+                    "required": True,
+                    "default": "range",
+                    "description": "选择集数过滤的方式。",
+                    "options": [
+                        {"value": "range", "label": "按集数范围（起始集~结束集）"},
+                        {"value": "latest", "label": "只下载最新N集"},
+                        {"value": "range_latest", "label": "范围+最新N集（两者交集）"},
+                    ],
+                },
+                {
                     "key": "start_episode",
                     "label": "起始集数",
                     "type": "integer",
                     "required": False,
                     "default": default_start,
-                    "description": "从第几集开始下载，默认从第 1 集开始。",
+                    "description": "从第几集开始下载，1 表示从第1集开始。在「最新N集」模式下此选项无效。",
                     "min": 1,
                 },
                 {
@@ -249,7 +123,16 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
                     "type": "integer",
                     "required": False,
                     "default": default_end,
-                    "description": "下载到第几集结束，0 表示不设上限（直到最新一集）。",
+                    "description": "下载到第几集结束，0 表示不设上限（直到最新一集）。在「最新N集」模式下此选项无效。",
+                    "min": 0,
+                },
+                {
+                    "key": "latest_count",
+                    "label": "下载最新N集",
+                    "type": "integer",
+                    "required": False,
+                    "default": default_latest,
+                    "description": "只下载最新的N集（从最大集数倒推）。例如：有1-120集，设为3则下载118、119、120。0表示不启用此功能。",
                     "min": 0,
                 },
                 {
@@ -259,6 +142,22 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
                     "required": False,
                     "default": "",
                     "description": "手动标记不下载的集数，多个用英文逗号分隔，例如：3,5,8-12。",
+                },
+                {
+                    "key": "skip_downloaded",
+                    "label": "跳过已下载集数",
+                    "type": "boolean",
+                    "required": False,
+                    "default": default_skip,
+                    "description": "是否跳过已经下载过的集数。需要在下方填写已下载的集数范围。",
+                },
+                {
+                    "key": "downloaded_episodes",
+                    "label": "已下载的集数",
+                    "type": "string",
+                    "required": False,
+                    "default": "",
+                    "description": "已经下载过的集数，会被自动跳过。格式同屏蔽集数，例如：1-80 或 1,3,5-10。",
                 },
                 {
                     "key": "blocked_item_ids",
@@ -289,7 +188,10 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
             default_config={
                 "start_episode": default_start,
                 "end_episode": default_end,
+                "latest_count": default_latest,
                 "blocked_episodes": "",
+                "skip_downloaded": default_skip,
+                "downloaded_episodes": "",
                 "blocked_item_ids": [],
                 "only_video_files": True,
                 "include_folders": True,
@@ -300,24 +202,33 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
     def validate_config(self, config: dict[str, Any]) -> OperationResult:
         errors: list[str] = []
 
-        start = int(config.get("start_episode", 1) or 1)
-        end = int(config.get("end_episode", 0) or 0)
+        filter_mode = str(config.get("filter_mode", "range") or "range")
 
-        if start < 1:
-            errors.append("起始集数必须大于等于 1。")
+        if filter_mode in ("range", "range_latest"):
+            start = int(config.get("start_episode", 1) or 1)
+            end = int(config.get("end_episode", 0) or 0)
 
-        if end < 0:
-            errors.append("结束集数不能为负数。")
+            if start < 1:
+                errors.append("起始集数必须大于等于 1。")
 
-        if end > 0 and start > end:
-            errors.append("起始集数不能大于结束集数。")
+            if end < 0:
+                errors.append("结束集数不能为负数。")
 
-        blocked_raw = str(config.get("blocked_episodes", "") or "").strip()
-        if blocked_raw:
-            try:
-                self._parse_blocked_episodes(blocked_raw)
-            except ValueError as exc:
-                errors.append(f"屏蔽集数格式错误：{exc}")
+            if end > 0 and start > end:
+                errors.append("起始集数不能大于结束集数。")
+
+        latest_count = int(config.get("latest_count", 0) or 0)
+        if latest_count < 0:
+            errors.append("最新N集不能为负数。")
+
+        for field_name in ("blocked_episodes", "downloaded_episodes"):
+            raw = str(config.get(field_name, "") or "").strip()
+            if raw:
+                try:
+                    self._parse_episode_list(raw)
+                except ValueError as exc:
+                    label = "屏蔽集数" if field_name == "blocked_episodes" else "已下载集数"
+                    errors.append(f"{label}格式错误：{exc}")
 
         if errors:
             return OperationResult(
@@ -332,15 +243,30 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
         title = str(resource.get("title") or "未命名资源").strip()
         rule = self._match_rule(title)
 
+        latest_count = int(rule.get("latest_count", self._runtime_config.get("default_latest_count", 0)) or 0)
+
+        filter_mode = "range"
+        if latest_count > 0:
+            start = int(rule.get("start_episode", 0) or 0)
+            end = int(rule.get("end_episode", 0) or 0)
+            if start == 0 and end == 0:
+                filter_mode = "latest"
+            else:
+                filter_mode = "range_latest"
+
         return {
             "title": f"过滤下载：{title}",
             "input_type": "resource",
             "input_payload": {"resource": resource},
             "config": {
                 "resource_title": title,
+                "filter_mode": filter_mode,
                 "start_episode": int(rule.get("start_episode", self._runtime_config.get("default_start_episode", 1)) or 1),
                 "end_episode": int(rule.get("end_episode", self._runtime_config.get("default_end_episode", 0)) or 0),
+                "latest_count": latest_count,
                 "blocked_episodes": str(rule.get("blocked_episodes", self._runtime_config.get("default_blocked_episodes", "")) or ""),
+                "skip_downloaded": bool(rule.get("skip_downloaded", self._runtime_config.get("default_skip_downloaded", True))),
+                "downloaded_episodes": str(rule.get("downloaded_episodes", "") or ""),
                 "blocked_item_ids": [],
                 "only_video_files": True,
                 "include_folders": True,
@@ -380,11 +306,17 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
         if resource_title:
             rule = self._match_rule(resource_title)
             if rule.get("keyword"):
-                logs.append(f"匹配到规则「{rule.get('keyword')}」：起始集 {rule.get('start_episode')}，结束集 {rule.get('end_episode') or '不限'}，屏蔽集数 {rule.get('blocked_episodes') or '无'}")
+                logs.append(f"匹配到规则「{rule.get('keyword')}」")
                 config["start_episode"] = int(rule.get("start_episode", config.get("start_episode", 1)) or 1)
                 config["end_episode"] = int(rule.get("end_episode", config.get("end_episode", 0)) or 0)
+                config["latest_count"] = int(rule.get("latest_count", config.get("latest_count", 0)) or 0)
                 config["blocked_episodes"] = str(rule.get("blocked_episodes", config.get("blocked_episodes", "")) or "")
+                config["skip_downloaded"] = bool(rule.get("skip_downloaded", config.get("skip_downloaded", True)))
+                if rule.get("downloaded_episodes"):
+                    config["downloaded_episodes"] = str(rule.get("downloaded_episodes", ""))
 
+        filter_mode = str(config.get("filter_mode", "range") or "range")
+        logs.append(f"过滤模式：{self._filter_mode_label(filter_mode)}")
         logs.append(f"开始过滤网盘内容，原始条目数：{len(items)}")
 
         result = self._filter_items(items, config)
@@ -392,7 +324,9 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
         logs.append(f"集数识别完成，识别到 {len(result['recognized'])} 项带集数的内容")
         logs.append(f"过滤规则：起始集 {result['config'].get('start_episode')}，"
                     f"结束集 {result['config'].get('end_episode') or '不限'}，"
-                    f"屏蔽集数 {result['config'].get('blocked_episodes') or '无'}")
+                    f"最新N集 {result['config'].get('latest_count') or '不启用'}，"
+                    f"屏蔽集数 {result['config'].get('blocked_episodes') or '无'}，"
+                    f"跳过已下载 {'启用' if result['config'].get('skip_downloaded') else '关闭'}")
         logs.append(f"保留 {len(result['kept'])} 项，过滤 {len(result['filtered'])} 项")
 
         for item in result["filtered"]:
@@ -417,18 +351,20 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
             logs=logs,
         )
 
-    # ============================================================
-    # 内部方法：过滤
-    # ============================================================
-
     def _filter_items(
         self, items: list[dict[str, Any]], config: dict[str, Any]
     ) -> dict[str, Any]:
+        filter_mode = str(config.get("filter_mode", "range") or "range")
         start_episode = int(config.get("start_episode", 1) or 1)
         end_episode = int(config.get("end_episode", 0) or 0)
-        blocked_episodes = self._parse_blocked_episodes(
+        latest_count = int(config.get("latest_count", 0) or 0)
+        blocked_episodes = self._parse_episode_list(
             str(config.get("blocked_episodes", "") or "")
         )
+        skip_downloaded = bool(config.get("skip_downloaded", True))
+        downloaded_episodes = self._parse_episode_list(
+            str(config.get("downloaded_episodes", "") or "")
+        ) if skip_downloaded else set()
         blocked_item_ids = set(
             str(i) for i in (config.get("blocked_item_ids", []) or [])
         )
@@ -436,18 +372,38 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
         include_folders = bool(config.get("include_folders", True))
         patterns = self._get_episode_patterns()
 
-        kept: list[dict[str, Any]] = []
-        filtered: list[dict[str, Any]] = []
-        recognized: list[dict[str, Any]] = []
+        all_recognized_episodes: list[int] = []
+        parsed_items: list[dict[str, Any]] = []
 
         for item in items:
             item = dict(item)
             name = str(item.get("name", "") or "")
             item_type = str(item.get("type", "file") or "file")
+            episode = self._extract_episode(name, patterns)
+            item["_episode"] = episode
+            if episode is not None:
+                all_recognized_episodes.append(episode)
+            parsed_items.append(item)
+
+        latest_threshold = None
+        if filter_mode in ("latest", "range_latest") and latest_count > 0 and all_recognized_episodes:
+            sorted_eps = sorted(set(all_recognized_episodes), reverse=True)
+            if len(sorted_eps) >= latest_count:
+                latest_threshold = sorted_eps[latest_count - 1]
+            else:
+                latest_threshold = sorted_eps[-1] if sorted_eps else None
+
+        kept: list[dict[str, Any]] = []
+        filtered: list[dict[str, Any]] = []
+        recognized: list[dict[str, Any]] = []
+
+        for item in parsed_items:
+            name = str(item.get("name", "") or "")
+            item_type = str(item.get("type", "file") or "file")
             item_id = str(item.get("id", "") or "")
+            episode = item.get("_episode")
 
             if item_type == "folder" and not include_folders:
-                item["_episode"] = None
                 item["_filter_reason"] = "文件夹过滤已关闭"
                 filtered.append(item)
                 continue
@@ -455,20 +411,14 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
             if item_type == "file" and only_video:
                 ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
                 if ext not in VIDEO_EXTENSIONS:
-                    item["_episode"] = None
                     item["_filter_reason"] = "非视频文件"
                     filtered.append(item)
                     continue
 
             if item_id in blocked_item_ids:
-                episode = self._extract_episode(name, patterns)
-                item["_episode"] = episode
                 item["_filter_reason"] = "手动屏蔽该条目"
                 filtered.append(item)
                 continue
-
-            episode = self._extract_episode(name, patterns)
-            item["_episode"] = episode
 
             if episode is not None:
                 recognized.append(item)
@@ -478,15 +428,27 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
                     filtered.append(item)
                     continue
 
-                if episode < start_episode:
-                    item["_filter_reason"] = f"集数 {episode} 早于起始集 {start_episode}"
+                if skip_downloaded and episode in downloaded_episodes:
+                    item["_filter_reason"] = f"集数 {episode} 已下载，跳过"
                     filtered.append(item)
                     continue
 
-                if end_episode > 0 and episode > end_episode:
-                    item["_filter_reason"] = f"集数 {episode} 晚于结束集 {end_episode}"
-                    filtered.append(item)
-                    continue
+                if filter_mode in ("range", "range_latest"):
+                    if episode < start_episode:
+                        item["_filter_reason"] = f"集数 {episode} 早于起始集 {start_episode}"
+                        filtered.append(item)
+                        continue
+
+                    if end_episode > 0 and episode > end_episode:
+                        item["_filter_reason"] = f"集数 {episode} 晚于结束集 {end_episode}"
+                        filtered.append(item)
+                        continue
+
+                if filter_mode in ("latest", "range_latest") and latest_count > 0 and latest_threshold is not None:
+                    if episode < latest_threshold:
+                        item["_filter_reason"] = f"集数 {episode} 不在最新 {latest_count} 集范围内（最新阈值: {latest_threshold}）"
+                        filtered.append(item)
+                        continue
 
             kept.append(item)
 
@@ -495,9 +457,14 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
             "filtered": filtered,
             "recognized": recognized,
             "config": {
+                "filter_mode": filter_mode,
                 "start_episode": start_episode,
                 "end_episode": end_episode,
+                "latest_count": latest_count,
+                "latest_threshold": latest_threshold,
                 "blocked_episodes": str(config.get("blocked_episodes", "") or ""),
+                "skip_downloaded": skip_downloaded,
+                "downloaded_episodes": str(config.get("downloaded_episodes", "") or ""),
                 "blocked_item_ids": list(blocked_item_ids),
             },
         }
@@ -523,7 +490,7 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
         return min(candidates)
 
     @staticmethod
-    def _parse_blocked_episodes(raw: str) -> set[int]:
+    def _parse_episode_list(raw: str) -> set[int]:
         result: set[int] = set()
         raw = raw.strip()
         if not raw:
@@ -553,6 +520,15 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
 
         return result
 
+    @staticmethod
+    def _filter_mode_label(mode: str) -> str:
+        labels = {
+            "range": "按集数范围",
+            "latest": "只下载最新N集",
+            "range_latest": "范围+最新N集（交集）",
+        }
+        return labels.get(mode, mode)
+
     def _get_episode_patterns(self) -> list[re.Pattern[str]]:
         custom_raw = str(self._runtime_config.get("episode_patterns", "") or "").strip()
         patterns_strs: list[str] = []
@@ -573,10 +549,6 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
                 continue
 
         return compiled
-
-    # ============================================================
-    # 内部方法：规则匹配
-    # ============================================================
 
     def _parse_all_rules(self) -> list[dict[str, Any]]:
         rules_raw = str(self._runtime_config.get("filter_rules", "") or "").strip()
@@ -600,10 +572,22 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
 
             rule = {
                 "keyword": keyword,
-                "start_episode": int(parts[1].strip()) if len(parts) > 1 and parts[1].strip() else 1,
+                "start_episode": int(parts[1].strip()) if len(parts) > 1 and parts[1].strip() else 0,
                 "end_episode": int(parts[2].strip()) if len(parts) > 2 and parts[2].strip() else 0,
-                "blocked_episodes": parts[3].strip() if len(parts) > 3 else "",
+                "latest_count": int(parts[3].strip()) if len(parts) > 3 and parts[3].strip() else 0,
+                "blocked_episodes": parts[4].strip() if len(parts) > 4 else "",
+                "skip_downloaded": True,
+                "downloaded_episodes": "",
             }
+
+            if len(parts) > 5:
+                val = parts[5].strip().lower()
+                if val in ("false", "0", "no", "off"):
+                    rule["skip_downloaded"] = False
+
+            if len(parts) > 6:
+                rule["downloaded_episodes"] = parts[6].strip()
+
             rules.append(rule)
 
         return rules
@@ -621,7 +605,10 @@ class DriveDownloadFilterPlugin(BasePlugin, TaskTypeProvider, AutomationProvider
             "keyword": "",
             "start_episode": self._runtime_config.get("default_start_episode", 1),
             "end_episode": self._runtime_config.get("default_end_episode", 0),
+            "latest_count": self._runtime_config.get("default_latest_count", 0),
             "blocked_episodes": self._runtime_config.get("default_blocked_episodes", ""),
+            "skip_downloaded": self._runtime_config.get("default_skip_downloaded", True),
+            "downloaded_episodes": "",
         }
 
 

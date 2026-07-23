@@ -1,9 +1,9 @@
 {
   "id": "task.drive_download_filter",
   "name": "网盘下载集数过滤",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "category": "task",
-  "description": "在网盘下载/转存任务扫描完成后，自动介入并根据集数范围或屏蔽列表过滤需要下载的剧集。支持按资源名称匹配过滤规则，可设置起始/结束集数，或手动标记屏蔽不下载的内容，确保只下载需要的剧集。",
+  "description": "在创建网盘下载任务时，提供集数范围选择、屏蔽功能和最新集数下载。支持自动识别网盘内容中的集数编号，可设置起始/结束集数、下载最新N集、跳过已下载集数，或手动标记屏蔽不下载的内容，确保只下载需要的剧集。",
   "author": "T3FAP Community",
   "homepage": "",
   "license": "MIT",
@@ -12,8 +12,7 @@
   "capabilities": [
     "task.template",
     "task.executor",
-    "task.from_resource",
-    "automation.event_handler"
+    "task.from_resource"
   ],
   "backend": {
     "entry": "backend.plugin:plugin"
@@ -25,32 +24,12 @@
   "optional_dependencies": [],
   "config_schema": [
     {
-      "key": "auto_filter_enabled",
-      "label": "启用自动过滤",
-      "type": "boolean",
-      "required": false,
-      "default": true,
-      "description": "是否在网盘下载/转存任务扫描完成后自动应用集数过滤规则。关闭后需手动创建过滤任务。",
-      "secret": false,
-      "group": "自动过滤"
-    },
-    {
-      "key": "auto_filter_templates",
-      "label": "自动过滤的任务模板",
-      "type": "string",
-      "required": false,
-      "default": "网盘下载任务,网盘转存任务",
-      "description": "哪些任务模板会触发自动过滤，多个模板名称用英文逗号分隔。",
-      "secret": false,
-      "group": "自动过滤"
-    },
-    {
       "key": "default_start_episode",
       "label": "默认起始集数",
       "type": "integer",
       "required": false,
       "default": 1,
-      "description": "未匹配到规则时的默认起始集数，1 表示从第1集开始。",
+      "description": "新建任务时默认的起始集数，1 表示从第1集开始。",
       "secret": false,
       "group": "默认规则"
     },
@@ -60,7 +39,17 @@
       "type": "integer",
       "required": false,
       "default": 0,
-      "description": "未匹配到规则时的默认结束集数，0 表示不设上限（直到最新一集）。",
+      "description": "新建任务时默认的结束集数，0 表示不设上限（直到最新一集）。",
+      "secret": false,
+      "group": "默认规则"
+    },
+    {
+      "key": "default_latest_count",
+      "label": "默认下载最新N集",
+      "type": "integer",
+      "required": false,
+      "default": 0,
+      "description": "默认只下载最新的N集，从最大集数倒推。0 表示不启用此功能（按起始/结束集数范围下载）。",
       "secret": false,
       "group": "默认规则"
     },
@@ -70,7 +59,17 @@
       "type": "string",
       "required": false,
       "default": "",
-      "description": "未匹配到规则时的默认屏蔽集数，例如：3,5,8-12。留空表示不屏蔽。",
+      "description": "默认屏蔽的集数，例如：3,5,8-12。留空表示不屏蔽。",
+      "secret": false,
+      "group": "默认规则"
+    },
+    {
+      "key": "default_skip_downloaded",
+      "label": "默认跳过已下载",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "默认是否跳过已经下载过的集数（根据集数编号判断）。",
       "secret": false,
       "group": "默认规则"
     },
@@ -80,7 +79,7 @@
       "type": "string",
       "required": false,
       "default": "",
-      "description": "按资源名称匹配的过滤规则，每行一条，格式：资源关键词|起始集|结束集|屏蔽集数。例如：沧元图|1|50| 或 某动漫|10|0|3,5,8-12。结束集为0表示不限。",
+      "description": "按资源名称匹配的过滤规则，每行一条，格式：资源关键词|起始集|结束集|最新N集|屏蔽集数|跳过已下载。例如：沧元图|1|50|0||true 或 某动漫|0|0|3|3,5,8-12|true。起始集/结束集/最新N集为0表示不启用。跳过已下载：true/false。",
       "secret": false,
       "group": "规则配置"
     },
