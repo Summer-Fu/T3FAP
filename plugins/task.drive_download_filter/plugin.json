@@ -19,9 +19,7 @@
     "entry": "backend.plugin:plugin"
   },
   "permissions": [
-    "task.dispatch",
-    "task.read",
-    "task.update"
+    "task.dispatch"
   ],
   "dependencies": [],
   "optional_dependencies": [],
