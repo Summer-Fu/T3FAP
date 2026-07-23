@@ -1,9 +1,9 @@
 {
-  "id": "drive.quark_filter",
-  "name": "夸克网盘集数过滤",
+  "id": "drive.quark",
+  "name": "夸克网盘",
   "version": "1.0.0",
   "category": "drive",
-  "description": "夸克网盘转存过滤器：在转存分享到个人网盘时自动按集数过滤，支持只转存最新N集、屏蔽指定集数等模式。非选中的集数保存到子文件夹。",
+  "description": "提供夸克网盘账号接入、扫码登录、文件浏览、分享解析与转存能力。支持按集数过滤转存，最新N集保存到根目录，其余保存到子文件夹。",
   "core_version": ">=1.0.0 <2.0.0",
   "contract_version": "1.0",
   "capabilities": [

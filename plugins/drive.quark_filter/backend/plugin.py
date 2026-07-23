@@ -562,8 +562,8 @@ class QuarkAPI:
 # ---------------------------------------------------------------------------
 
 class QuarkFilterDrivePlugin(BasePlugin):
-    plugin_id = "drive.quark_filter"
-    plugin_name = "夸克网盘集数过滤"
+    plugin_id = "drive.quark"
+    plugin_name = "夸克网盘"
     plugin_version = "1.0.0"
 
     def __init__(self) -> None:
@@ -589,7 +589,7 @@ class QuarkFilterDrivePlugin(BasePlugin):
         return {
             "plugin_id": self.plugin_id,
             "cloud_type": "quark",
-            "display_name": "夸克网盘（集数过滤版）",
+            "display_name": "夸克网盘",
             "account_mode": "user",
             "capabilities": ["drive.account", "drive.fs", "drive.share"],
             "account_form_schema": [
@@ -676,7 +676,7 @@ class QuarkFilterDrivePlugin(BasePlugin):
             "account_id": info.get("user_id", "quark-filter-user"),
             "plugin_id": self.plugin_id,
             "cloud_type": "quark",
-            "display_name": "夸克网盘（集数过滤版）",
+            "display_name": "夸克网盘",
             "status": "ok" if info.get("success") else "error",
             "nickname": info.get("nickname", ""),
         }
