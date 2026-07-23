@@ -568,6 +568,7 @@ class QuarkFilterDrivePlugin(BasePlugin):
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
+        self._scan_sessions: dict[str, dict[str, Any]] = {}
 
     def set_runtime_config(self, config: dict[str, Any]) -> None:
         self._runtime_config = dict(config or {})
@@ -596,15 +597,15 @@ class QuarkFilterDrivePlugin(BasePlugin):
                     "key": "cookie",
                     "label": "夸克Cookie",
                     "type": "string",
-                    "required": True,
+                    "required": False,
                     "default": "",
-                    "description": "登录夸克网盘网页版后从浏览器获取的完整Cookie。",
+                    "description": "登录夸克网盘网页版后从浏览器获取的完整Cookie。如使用扫码登录可不填。",
                     "secret": True,
                 }
             ],
             "supported_auth_types": ["cookie", "qrcode", "desktop"],
             "supported_actions": {
-                "account": ["test", "qrcode_start", "qrcode_check", "desktop_get"],
+                "account": ["test", "scan_start", "scan_status", "scan_cancel", "desktop_get"],
                 "fs": ["list", "mkdir"],
                 "share": ["parse", "browse", "save"],
                 "file": [],
@@ -1030,16 +1031,85 @@ class QuarkFilterDrivePlugin(BasePlugin):
     def delete(self, account_ref: dict[str, Any], item_ids: list[str]) -> dict[str, Any]:
         return {"success": False, "message": "delete暂未实现，请使用夸克官方客户端操作"}
 
-    # ---- 不支持的方法 ----
+    # ---- 扫码登录（标准协议方法） ----
 
     def start_scan_login(self) -> dict[str, Any]:
-        return {"success": False, "message": "请手动输入Cookie"}
+        """发起扫码登录，获取二维码（标准协议方法）。"""
+        result = QuarkAPI.start_qr_login()
+        if not result.get("success"):
+            return result
+
+        token = result.get("token", "")
+        request_id = result.get("request_id", "")
+        # 生成scan_id并存储会话
+        scan_id = f"qr_{token}_{int(time.time())}"
+        self._scan_sessions[scan_id] = {
+            "token": token,
+            "request_id": request_id,
+            "status": "pending",
+            "created_at": time.time(),
+        }
+
+        return {
+            "success": True,
+            "scan_id": scan_id,
+            "qrcode_url": result.get("qrcode_url", ""),
+            "qrcode_content": result.get("qrcode_content", ""),
+            "message": "请使用夸克APP扫描二维码登录",
+        }
 
     def get_scan_status(self, scan_id: str) -> dict[str, Any]:
-        return {"success": False, "message": "不支持扫码登录"}
+        """轮询扫码状态（标准协议方法）。"""
+        session = self._scan_sessions.get(scan_id)
+        if not session:
+            return {"success": False, "status": "expired", "message": "扫码会话不存在或已过期"}
+
+        token = session.get("token", "")
+        request_id = session.get("request_id", "")
+
+        result = QuarkAPI.check_qrcode_status(token, request_id)
+        status = result.get("status", "")
+
+        if status == "confirmed":
+            ticket = result.get("ticket", "")
+            if ticket:
+                cookie_result = QuarkAPI.ticket_to_cookie(ticket)
+                if cookie_result.get("success"):
+                    # 清理会话
+                    self._scan_sessions.pop(scan_id, None)
+                    return {
+                        "success": True,
+                        "status": "confirmed",
+                        "account_payload": {
+                            "cookie": cookie_result.get("cookie", ""),
+                        },
+                        "account_info": {
+                            "nickname": cookie_result.get("nickname", ""),
+                            "user_id": cookie_result.get("user_id", ""),
+                        },
+                        "message": "登录成功",
+                    }
+            # 有ticket但换取cookie失败的情况
+            self._scan_sessions.pop(scan_id, None)
+            return {
+                "success": False,
+                "status": "error",
+                "message": "扫码成功但换取凭证失败",
+            }
+        elif status == "expired":
+            self._scan_sessions.pop(scan_id, None)
+            return {"success": False, "status": "expired", "message": "二维码已过期，请重新扫描"}
+
+        return {
+            "success": True,
+            "status": status,  # waiting / confirmed / expired
+            "message": result.get("message", "等待扫码..."),
+        }
 
     def cancel_scan_login(self, scan_id: str) -> dict[str, Any]:
-        return {"success": False, "message": "不支持扫码登录"}
+        """取消扫码登录（标准协议方法）。"""
+        self._scan_sessions.pop(scan_id, None)
+        return {"success": True, "message": "已取消扫码登录"}
 
     def create_share(self, account_ref: dict[str, Any], item_ids: list[str], options: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "message": "创建分享暂未实现"}
@@ -1049,7 +1119,7 @@ class QuarkFilterDrivePlugin(BasePlugin):
 
     def get_supported_actions(self, context: dict[str, Any]) -> dict[str, Any]:
         return {
-            "account": ["test"],
+            "account": ["test", "scan_start", "scan_status", "scan_cancel", "desktop_get"],
             "fs": ["list", "mkdir"],
             "share": ["parse", "browse", "save"],
             "file": [],
