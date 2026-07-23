@@ -131,13 +131,233 @@ QUARK_DEFAULT_HEADERS = {
     "Referer": "https://pan.quark.cn/",
 }
 
+QUARK_UOP_URL = "https://uop.quark.cn"
+QUARK_DESKTOP_LOCAL_URL = "http://127.0.0.1:9128"
+QUARK_CLIENT_ID = "532"
+
 
 class QuarkAPI:
     """夸克网盘 HTTP API 客户端，负责与夸克服务器交互。"""
 
-    def __init__(self, cookie: str):
+    def __init__(self, cookie: str = ""):
         self.cookie = cookie
-        self.headers = {**QUARK_DEFAULT_HEADERS, "Cookie": cookie}
+        self.headers = {**QUARK_DEFAULT_HEADERS, "Cookie": cookie} if cookie else {**QUARK_DEFAULT_HEADERS}
+
+    # ---- 扫码登录 API ----
+
+    @staticmethod
+    def _gen_request_id() -> str:
+        """生成随机请求ID。"""
+        import uuid
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def start_qr_login() -> dict[str, Any]:
+        """
+        发起扫码登录，获取二维码。
+
+        返回：
+        - token: 扫码登录令牌（用于后续轮询）
+        - qrcode_url: 二维码图片URL
+        - qrcode_content: 二维码内容（用于前端渲染）
+        """
+        request_id = QuarkAPI._gen_request_id()
+        url = f"{QUARK_UOP_URL}/cas/ajax/getTokenForQrcodeLogin"
+        params = {
+            "client_id": QUARK_CLIENT_ID,
+            "v": "1.2",
+            "request_id": request_id,
+        }
+        result = QuarkAPI._static_get(url, params)
+
+        if result.get("success") or result.get("code") == 0 or result.get("status") == 200:
+            data = result.get("data", result)
+            token = data.get("token", "")
+            qrcode_url = data.get("qrcodeUrl", "") or data.get("qrCodeUrl", "")
+            return {
+                "success": True,
+                "token": token,
+                "qrcode_url": qrcode_url,
+                "qrcode_content": token,
+                "request_id": request_id,
+            }
+        return {
+            "success": False,
+            "error": result.get("message", "获取二维码失败"),
+            "raw": result,
+        }
+
+    @staticmethod
+    def check_qrcode_status(token: str, request_id: str = "") -> dict[str, Any]:
+        """
+        轮询扫码登录状态。
+
+        返回状态：
+        - waiting: 等待扫码
+        - scanned: 已扫码，等待确认
+        - confirmed: 已确认登录，返回ticket
+        - expired: 二维码已过期
+        - cancelled: 已取消
+        """
+        req_id = request_id or QuarkAPI._gen_request_id()
+        url = f"{QUARK_UOP_URL}/cas/ajax/getServiceTicketByQrcodeToken"
+        params = {
+            "client_id": QUARK_CLIENT_ID,
+            "v": "1.2",
+            "request_id": req_id,
+            "token": token,
+        }
+        result = QuarkAPI._static_get(url, params)
+
+        code = result.get("code")
+        data = result.get("data", result)
+
+        if code == 0 or result.get("success"):
+            ticket = data.get("ticket", "")
+            if ticket:
+                return {"status": "confirmed", "ticket": ticket, "data": data}
+            else:
+                status_code = data.get("code", data.get("status", 0))
+                if status_code == 10001:
+                    return {"status": "waiting", "data": data}
+                elif status_code == 10002:
+                    return {"status": "scanned", "data": data}
+                elif status_code == 10003:
+                    return {"status": "expired", "data": data}
+                else:
+                    return {"status": "waiting", "data": data}
+        else:
+            return {"status": "error", "error": result.get("message", "查询状态失败"), "raw": result}
+
+    @staticmethod
+    def ticket_to_cookie(ticket: str) -> dict[str, Any]:
+        """
+        使用登录ticket换取Cookie。
+
+        注意：这一步通常需要调用夸克的登录接口。由于夸克网页版在拿到ticket后，
+        会通过一系列重定向来设置Cookie。我们这里直接尝试使用ticket换取用户信息，
+        并尝试构造可用的Cookie。
+        """
+        url = f"{QUARK_UOP_URL}/cas/login"
+        params = {
+            "client_id": QUARK_CLIENT_ID,
+            "v": "1.2",
+            "ticket": ticket,
+            "redirect_url": "https://pan.quark.cn/",
+        }
+        try:
+            import requests as _requests
+            session = _requests.Session()
+            resp = session.get(url, params=params, headers=QUARK_DEFAULT_HEADERS, timeout=30, allow_redirects=True)
+            cookies_dict = session.cookies.get_dict()
+            cookie_str = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+            if cookie_str:
+                api = QuarkAPI(cookie_str)
+                info = api.get_account_info()
+                if info.get("success"):
+                    return {
+                        "success": True,
+                        "cookie": cookie_str,
+                        "nickname": info.get("nickname", ""),
+                        "user_id": info.get("user_id", ""),
+                    }
+                return {"success": True, "cookie": cookie_str}
+            return {"success": False, "error": "未能获取到Cookie"}
+        except Exception as e:
+            return {"success": False, "error": f"换取Cookie失败：{str(e)}"}
+
+    # ---- 本地桌面客户端接口（从系统读取登录状态）----
+
+    @staticmethod
+    def check_desktop_client() -> dict[str, Any]:
+        """
+        检查本地夸克桌面客户端是否运行。
+
+        这就是"从系统读取Cookie"的方式：
+        夸克桌面客户端会在本地启动一个HTTP服务（端口9128），
+        网页可以通过这个服务获取登录凭证。
+        """
+        try:
+            import requests as _requests
+            resp = _requests.get(f"{QUARK_DESKTOP_LOCAL_URL}/desktop_info", timeout=3)
+            if resp.status_code == 200:
+                data = resp.json()
+                return {"success": True, "info": data}
+            return {"success": False, "error": "桌面客户端未响应"}
+        except Exception:
+            return {"success": False, "error": "桌面客户端未运行或端口不可达"}
+
+    @staticmethod
+    def get_cookie_from_desktop() -> dict[str, Any]:
+        """
+        从本地夸克桌面客户端获取登录Cookie。
+
+        这是最方便的方式：只要用户在电脑上打开了夸克桌面客户端并登录了，
+        就可以直接获取到Cookie，无需手动复制。
+        """
+        try:
+            import requests as _requests
+            info_resp = _requests.get(f"{QUARK_DESKTOP_LOCAL_URL}/desktop_info", timeout=3)
+            if info_resp.status_code != 200:
+                return {"success": False, "error": "桌面客户端未运行"}
+
+            token_resp = _requests.get(f"{QUARK_DESKTOP_LOCAL_URL}/desktop_webtokenid", timeout=3)
+            if token_resp.status_code != 200:
+                return {"success": False, "error": "获取tokenId失败"}
+
+            token_data = token_resp.json()
+            token_id = token_data.get("tokenId") or token_data.get("token_id") or ""
+            if not token_id:
+                return {"success": False, "error": "tokenId为空"}
+
+            cookie_resp = _requests.get(
+                f"{QUARK_DESKTOP_LOCAL_URL}/desktop_webtoken",
+                params={"tokenId": token_id, "platform": "browser"},
+                timeout=5,
+            )
+            if cookie_resp.status_code != 200:
+                return {"success": False, "error": "获取Cookie失败"}
+
+            cookie_data = cookie_resp.json()
+            token = cookie_data.get("token") or cookie_data.get("webToken") or ""
+            if not token:
+                return {"success": False, "error": "返回的token为空"}
+
+            cookie_str = f"__pushtokenxxx={token}"
+            api = QuarkAPI(cookie_str)
+            info = api.get_account_info()
+            if info.get("success"):
+                return {
+                    "success": True,
+                    "cookie": cookie_str,
+                    "nickname": info.get("nickname", ""),
+                    "user_id": info.get("user_id", ""),
+                    "source": "desktop",
+                }
+
+            return {
+                "success": True,
+                "cookie": cookie_str,
+                "source": "desktop",
+                "note": "Cookie已获取，有效性待验证",
+            }
+
+        except Exception as e:
+            return {"success": False, "error": f"从桌面客户端获取Cookie失败：{str(e)}"}
+
+    @staticmethod
+    def _static_get(url: str, params: dict[str, Any]) -> dict[str, Any]:
+        """静态GET请求（不需要Cookie）。"""
+        try:
+            from core.services.resource_http import fetch_json
+            return fetch_json(url, params=params, headers=QUARK_DEFAULT_HEADERS)
+        except ImportError:
+            try:
+                import requests
+                resp = requests.get(url, params=params, headers=QUARK_DEFAULT_HEADERS, timeout=30)
+                return resp.json()
+            except Exception:
+                return {"code": -1, "message": "请求失败"}
 
     # ---- 分享相关 API ----
 
@@ -382,9 +602,9 @@ class QuarkFilterDrivePlugin(BasePlugin):
                     "secret": True,
                 }
             ],
-            "supported_auth_types": ["cookie"],
+            "supported_auth_types": ["cookie", "qrcode", "desktop"],
             "supported_actions": {
-                "account": ["test"],
+                "account": ["test", "qrcode_start", "qrcode_check", "desktop_get"],
                 "fs": ["list", "mkdir"],
                 "share": ["parse", "browse", "save"],
                 "file": [],
@@ -404,6 +624,45 @@ class QuarkFilterDrivePlugin(BasePlugin):
         if info.get("success"):
             return {"success": True, "message": f"账号验证成功：{info.get('nickname', '')}"}
         return {"success": False, "message": info.get("error", "Cookie无效")}
+
+    # ---- 扫码登录相关方法 ----
+
+    def qrcode_start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """发起扫码登录，获取二维码。"""
+        result = QuarkAPI.start_qr_login()
+        return result
+
+    def qrcode_check(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """轮询扫码状态。"""
+        token = str(payload.get("token") or "").strip()
+        request_id = str(payload.get("request_id") or "").strip()
+        if not token:
+            return {"status": "error", "error": "缺少token参数"}
+
+        result = QuarkAPI.check_qrcode_status(token, request_id)
+
+        if result.get("status") == "confirmed":
+            ticket = result.get("ticket", "")
+            if ticket:
+                cookie_result = QuarkAPI.ticket_to_cookie(ticket)
+                if cookie_result.get("success"):
+                    return {
+                        "status": "confirmed",
+                        "cookie": cookie_result.get("cookie", ""),
+                        "nickname": cookie_result.get("nickname", ""),
+                        "user_id": cookie_result.get("user_id", ""),
+                    }
+                return {
+                    "status": "confirmed",
+                    "ticket": ticket,
+                    "note": "扫码成功，请使用ticket换取Cookie",
+                }
+        return result
+
+    def desktop_get(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """从本地夸克桌面客户端获取Cookie。"""
+        result = QuarkAPI.get_cookie_from_desktop()
+        return result
 
     def create_account_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         return {"cookie": str(payload.get("cookie") or "").strip()}

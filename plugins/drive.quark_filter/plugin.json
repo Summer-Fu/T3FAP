@@ -23,9 +23,9 @@
       "key": "cookie",
       "label": "夸克网盘Cookie",
       "type": "string",
-      "required": true,
+      "required": false,
       "default": "",
-      "description": "登录夸克网盘网页版后从浏览器开发者工具中获取的完整Cookie字符串。这是所有API操作的基础。",
+      "description": "登录夸克网盘网页版后从浏览器开发者工具中获取的完整Cookie字符串。也可以通过扫码登录或桌面客户端自动获取。",
       "secret": true,
       "group": "账号设置"
     },
