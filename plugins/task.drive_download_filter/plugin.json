@@ -1,0 +1,136 @@
+{
+  "id": "task.drive_download_filter",
+  "name": "网盘下载集数过滤",
+  "version": "0.2.0",
+  "category": "task",
+  "description": "在网盘下载/转存任务扫描完成后，自动介入并根据集数范围或屏蔽列表过滤需要下载的剧集。支持按资源名称匹配过滤规则，可设置起始/结束集数，或手动标记屏蔽不下载的内容，确保只下载需要的剧集。",
+  "author": "T3FAP Community",
+  "homepage": "",
+  "license": "MIT",
+  "core_version": ">=1.0.0 <2.0.0",
+  "contract_version": "1.0",
+  "capabilities": [
+    "task.template",
+    "task.executor",
+    "task.from_resource",
+    "automation.event_handler"
+  ],
+  "backend": {
+    "entry": "backend.plugin:plugin"
+  },
+  "permissions": [
+    "task.dispatch",
+    "task.read",
+    "task.update"
+  ],
+  "dependencies": [],
+  "optional_dependencies": [],
+  "config_schema": [
+    {
+      "key": "auto_filter_enabled",
+      "label": "启用自动过滤",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "是否在网盘下载/转存任务扫描完成后自动应用集数过滤规则。关闭后需手动创建过滤任务。",
+      "secret": false,
+      "group": "自动过滤"
+    },
+    {
+      "key": "auto_filter_templates",
+      "label": "自动过滤的任务模板",
+      "type": "string",
+      "required": false,
+      "default": "网盘下载任务,网盘转存任务",
+      "description": "哪些任务模板会触发自动过滤，多个模板名称用英文逗号分隔。",
+      "secret": false,
+      "group": "自动过滤"
+    },
+    {
+      "key": "default_start_episode",
+      "label": "默认起始集数",
+      "type": "integer",
+      "required": false,
+      "default": 1,
+      "description": "未匹配到规则时的默认起始集数，1 表示从第1集开始。",
+      "secret": false,
+      "group": "默认规则"
+    },
+    {
+      "key": "default_end_episode",
+      "label": "默认结束集数",
+      "type": "integer",
+      "required": false,
+      "default": 0,
+      "description": "未匹配到规则时的默认结束集数，0 表示不设上限（直到最新一集）。",
+      "secret": false,
+      "group": "默认规则"
+    },
+    {
+      "key": "default_blocked_episodes",
+      "label": "默认屏蔽集数",
+      "type": "string",
+      "required": false,
+      "default": "",
+      "description": "未匹配到规则时的默认屏蔽集数，例如：3,5,8-12。留空表示不屏蔽。",
+      "secret": false,
+      "group": "默认规则"
+    },
+    {
+      "key": "filter_rules",
+      "label": "过滤规则列表",
+      "type": "string",
+      "required": false,
+      "default": "",
+      "description": "按资源名称匹配的过滤规则，每行一条，格式：资源关键词|起始集|结束集|屏蔽集数。例如：沧元图|1|50| 或 某动漫|10|0|3,5,8-12。结束集为0表示不限。",
+      "secret": false,
+      "group": "规则配置"
+    },
+    {
+      "key": "episode_patterns",
+      "label": "集数识别正则",
+      "type": "string",
+      "required": false,
+      "default": "[第\\s]*(\\d{1,4})[集话話期回]|\\bE?(\\d{1,4})\\b|-(\\d{1,4})\\s*\\[|\\[(\\d{1,4})\\]",
+      "description": "用于从文件名或文件夹名中识别集数的正则表达式，多个模式用英文逗号分隔。默认已覆盖常见命名格式。",
+      "secret": false,
+      "group": "高级设置"
+    },
+    {
+      "key": "only_video_files",
+      "label": "仅识别视频文件",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "是否仅对视频文件进行集数识别和过滤，推荐开启。",
+      "secret": false,
+      "group": "高级设置"
+    },
+    {
+      "key": "include_folders",
+      "label": "包含文件夹匹配",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "是否也对文件夹名称进行集数识别，适用于按集数建文件夹的资源。",
+      "secret": false,
+      "group": "高级设置"
+    }
+  ],
+  "ui": {
+    "menus": [],
+    "settings_sections": [
+      {
+        "key": "task.drive_download_filter",
+        "title": "网盘下载集数过滤"
+      }
+    ],
+    "task_templates": [
+      "drive_download_filter"
+    ]
+  },
+  "healthcheck": {
+    "enabled": true,
+    "interval_seconds": 300
+  }
+}
