@@ -36,10 +36,18 @@
     {
       "key": "default_filter_mode",
       "label": "默认过滤模式",
-      "type": "string",
+      "type": "select",
       "required": false,
       "default": "all",
-      "description": "新建任务时的默认过滤模式。可选值：all（全部下载）、start_from（从指定集数开始）、latest_n（只下载最新N集）、exclude（屏蔽指定集数）、include_only（仅下载指定集数）、exclude_items（屏蔽指定文件/文件夹）。",
+      "options": [
+        {"value": "all", "label": "全部下载"},
+        {"value": "start_from", "label": "从指定集数开始下载"},
+        {"value": "latest_n", "label": "只下载最新N集"},
+        {"value": "exclude", "label": "屏蔽指定集数"},
+        {"value": "include_only", "label": "仅下载指定集数"},
+        {"value": "exclude_items", "label": "屏蔽指定文件/文件夹"}
+      ],
+      "description": "新建任务时的默认过滤模式。如果平台不支持下拉选择，请在文本框中手动输入以下值之一：all、start_from、latest_n、exclude、include_only、exclude_items。",
       "secret": false,
       "group": "基础设置"
     },
