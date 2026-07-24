@@ -64,7 +64,7 @@ class DingdingBotPlugin(BasePlugin, AutomationProvider):
         if configured:
             details["webhook_host"] = self._get_webhook_host()
         return HealthReport(
-            status="ok" if configured else "warning",
+            status="ok" if configured else "degraded",
             message=f"{self.plugin_name} {'运行正常' if configured else '尚未配置 Webhook 地址'}。",
             details=details,
         )
