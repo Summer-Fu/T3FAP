@@ -9,6 +9,7 @@ import json
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any
 
 from core.sdk import AutomationProvider, BasePlugin, OperationResult
@@ -36,11 +37,91 @@ CATEGORY_EMOJI: dict[str, str] = {
     "系统通知": "🔔",
 }
 
+TASK_CATEGORY: dict[str, str] = {
+    "transfer": "转存",
+    "download": "下载",
+    "strm": "STRM 生成",
+    "cache_keep": "缓存保持",
+    "video_download": "影视下载",
+    "transcode": "转码",
+    "subtitle": "字幕",
+    "search": "搜索",
+}
+
+SOURCE_LABEL: dict[str, str] = {
+    "quark": "夸克网盘",
+    "aliyun": "阿里云盘",
+    "pan115": "115 网盘",
+    "115": "115 网盘",
+    "iqiyi": "爱奇艺",
+    "bilibili": "哔哩哔哩",
+    "youku": "优酷",
+    "tencent": "腾讯视频",
+    "mango": "芒果 TV",
+    "migu": "咪咕视频",
+    "cctv": "央视网",
+    "360": "360 影视",
+    "pansou": "盘搜",
+    "official": "官方视频源",
+    "drive": "网盘",
+    "video": "影视资源",
+    "catalog": "资源目录",
+}
+
+
+def _fmt_time(iso_str: str | None) -> str:
+    if not iso_str:
+        return ""
+    try:
+        if iso_str.endswith("Z"):
+            iso_str = iso_str[:-1] + "+00:00"
+        dt = datetime.fromisoformat(iso_str).astimezone()
+        return dt.strftime("%m月%d日 %H点%M分")
+    except Exception:
+        return iso_str
+
+
+def _parse_category_and_source(task_type: str | None, plugin_id: str | None) -> tuple[str, str]:
+    raw = (task_type or plugin_id or "").strip()
+    short = raw.replace("task.", "").replace("download.", "").replace("automation.", "")
+
+    category = "任务"
+    for key, label in TASK_CATEGORY.items():
+        if key in short:
+            category = label
+            break
+
+    source = "系统"
+    for key, label in SOURCE_LABEL.items():
+        if key in short.lower():
+            source = label
+            break
+
+    if source == "系统" and plugin_id:
+        for key, label in SOURCE_LABEL.items():
+            if key in plugin_id.lower():
+                source = label
+                break
+
+    return category, source
+
+
+def _task_type_label(task_type: str | None, plugin_id: str | None) -> str:
+    category, source = _parse_category_and_source(task_type, plugin_id)
+    if category == "任务" and source == "系统":
+        if task_type:
+            return task_type.replace("_", " ").title()
+        if plugin_id:
+            short = plugin_id.replace("task.", "").replace("download.", "").replace("automation.", "")
+            return short.replace("_", " ").title()
+        return "任务"
+    return f"{source} {category}"
+
 
 class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.4.0"
+    plugin_version = "1.6.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -102,9 +183,7 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
 
         if self._is_configured():
             try:
-                debug_info = json.dumps(event, ensure_ascii=False, default=str)
-                full_content = f"{content}\n\n--- 调试信息 ---\n{debug_info}"
-                self._send_to_dingtalk(title, full_content)
+                self._send_to_dingtalk(title, content)
             except Exception:
                 pass
 
@@ -161,8 +240,41 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
             resp.read()
 
     @staticmethod
-    def _category_for(event_type: str) -> str:
-        return EVENT_CATEGORY.get(event_type, "系统通知")
+    def _extract_resource_name(event: dict[str, Any], payload: dict[str, Any]) -> str:
+        data = payload.get("data") or {}
+        artifacts = payload.get("artifacts") or []
+        share_results = (data if isinstance(data, dict) else {}).get("share_results") or []
+
+        if share_results and isinstance(share_results, list):
+            name = share_results[0].get("share_name") or share_results[0].get("title")
+            if name:
+                return str(name)
+
+        if artifacts and isinstance(artifacts, list):
+            title = artifacts[0].get("title")
+            if title:
+                return str(title)
+
+        for key in ("share_name", "resource_name", "name", "title", "task_name"):
+            val = payload.get(key) or event.get(key) or data.get(key)
+            if val:
+                return str(val)
+
+        task_id = str(event.get("task_id") or payload.get("task_id") or "")
+        return f"任务 #{task_id}" if task_id else "未命名任务"
+
+    @staticmethod
+    def _collect_plugin_status(payload: dict[str, Any]) -> list[tuple[str, bool, str]]:
+        data = payload.get("data") or {}
+        post_plugins = (data if isinstance(data, dict) else {}).get("post_plugins") or []
+        results: list[tuple[str, bool, str]] = []
+        for p in post_plugins:
+            pid = str(p.get("plugin_id") or "")
+            success = bool(p.get("success"))
+            message = str(p.get("message") or ("成功" if success else "失败"))
+            label = pid.replace("automation.", "").replace("_", " ").title()
+            results.append((label, success, message))
+        return results
 
     @staticmethod
     def _normalize_runtime_config(config: dict[str, Any] | None) -> dict[str, Any]:
@@ -172,48 +284,78 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
     def _build_message(event: dict[str, Any]) -> tuple[str, str]:
         event_type = str(event.get("event_type") or "unknown")
         payload = dict(event.get("payload") or {})
+        data = payload.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+
         category = EVENT_CATEGORY.get(event_type, "系统通知")
         emoji = CATEGORY_EMOJI.get(category, "🔔")
+        task_type = str(event.get("task_type") or "")
+        plugin_id = str(event.get("plugin_id") or "")
+        task_category, source = _parse_category_and_source(task_type, plugin_id)
 
-        task_name = str(
-            payload.get("task_name")
-            or payload.get("name")
-            or payload.get("display_name")
-            or payload.get("title")
-            or event.get("task_name")
-            or event.get("name")
-            or payload.get("task_id")
-            or event.get("task_id")
-            or "未命名任务"
-        )
-        summary = str(payload.get("summary") or "").strip()
-        error_message = str(
-            payload.get("error_message")
-            or payload.get("error")
-            or summary
-            or "未知错误"
-        ).strip()
+        header = f"{emoji} T3 - {category}"
+        resource_name = DingdingBotAutomationPlugin._extract_resource_name(event, payload)
+        summary = str(payload.get("summary") or payload.get("message") or "").strip()
+        created_at = str(event.get("created_at") or payload.get("created_at") or "")
 
-        debug_info = json.dumps(event, ensure_ascii=False, default=str)
+        lines: list[str] = []
+        lines.append(f"{source} {task_category}通知")
+        lines.append(f"影视名称：{resource_name}")
 
         if event_type == "task.completed":
-            content = f"{task_name} 已执行完成。"
-            if summary:
-                content = f"{content} {summary}"
-            return f"{emoji} T3 - 任务完成", content
+            saved_count = data.get("saved_count") or data.get("transferred_count")
+            target_path = data.get("target_path") or data.get("save_path")
+            if saved_count and target_path:
+                action = task_category if task_category != "任务" else "处理"
+                lines.append(f"已{action}：{saved_count}项到{target_path}")
+            elif saved_count:
+                action = task_category if task_category != "任务" else "处理"
+                lines.append(f"已{action}：{saved_count}项")
 
-        if event_type == "task.failed":
-            return f"{emoji} T3 - 任务失败", f"{task_name} 执行失败：{error_message}"
+            artifacts = payload.get("artifacts") or []
+            if artifacts and isinstance(artifacts, list):
+                latest = artifacts[-1] if artifacts else {}
+                artifact_title = latest.get("title") or latest.get("name") or ""
+                artifact_path = latest.get("path") or ""
+                if artifact_title and artifact_title != resource_name:
+                    lines.append(f"最新剧集名称：{artifact_title}")
+                elif artifact_path:
+                    lines.append(f"输出路径：{artifact_path}")
 
-        if event_type == "task.started":
-            return f"{emoji} T3 - 任务开始", f"{task_name} 已开始执行。"
+            if created_at:
+                lines.append(f"剧集更新日期：{_fmt_time(created_at)}")
 
-        if event_type == "task.created":
-            return f"{emoji} T3 - 任务创建", f"已创建新任务：{task_name}"
+        elif event_type == "task.failed":
+            error = str(
+                payload.get("error_message")
+                or payload.get("error")
+                or summary
+                or "未知错误"
+            ).strip()
+            lines.append(f"失败原因：{error}")
+            if created_at:
+                lines.append(f"失败时间：{_fmt_time(created_at)}")
 
-        if summary:
-            return f"{emoji} T3 - 系统通知", f"{task_name}：{summary}"
-        return f"{emoji} T3 - 系统通知", f"{task_name} 触发事件：{event_type}"
+        elif event_type == "task.started":
+            if created_at:
+                lines.append(f"开始时间：{_fmt_time(created_at)}")
+
+        elif event_type == "task.created":
+            if created_at:
+                lines.append(f"创建时间：{_fmt_time(created_at)}")
+
+        if summary and event_type not in ("task.completed",):
+            lines.append(f"状态：{summary}")
+
+        plugin_status = DingdingBotAutomationPlugin._collect_plugin_status(payload)
+        if plugin_status:
+            lines.append("插件状态：")
+            for label, success, message in plugin_status:
+                status_icon = "成功" if success else "失败"
+                lines.append(f"  {label} {status_icon}")
+
+        return header, "\n".join(lines)
 
 
 plugin = DingdingBotAutomationPlugin()
