@@ -40,7 +40,7 @@ CATEGORY_EMOJI: dict[str, str] = {
 class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -102,7 +102,9 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
 
         if self._is_configured():
             try:
-                self._send_to_dingtalk(title, content)
+                debug_info = json.dumps(event, ensure_ascii=False, default=str)
+                full_content = f"{content}\n\n--- 调试信息 ---\n{debug_info}"
+                self._send_to_dingtalk(title, full_content)
             except Exception:
                 pass
 
@@ -175,7 +177,12 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
 
         task_name = str(
             payload.get("task_name")
+            or payload.get("name")
+            or payload.get("display_name")
             or payload.get("title")
+            or event.get("task_name")
+            or event.get("name")
+            or payload.get("task_id")
             or event.get("task_id")
             or "未命名任务"
         )
@@ -186,6 +193,8 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
             or summary
             or "未知错误"
         ).strip()
+
+        debug_info = json.dumps(event, ensure_ascii=False, default=str)
 
         if event_type == "task.completed":
             content = f"{task_name} 已执行完成。"
