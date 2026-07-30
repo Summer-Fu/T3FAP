@@ -127,26 +127,20 @@ def _format_episode_ranges(numbers: list[int]) -> str:
 
 
 def _parse_category_and_source(task_type: str | None, plugin_id: str | None) -> tuple[str, str]:
-    raw = (task_type or plugin_id or "").strip()
-    short = raw.replace("task.", "").replace("download.", "").replace("automation.", "")
-
     category = "任务"
+    source = "未识别来源"
+
+    all_raw = f"{task_type or ''} {plugin_id or ''}".lower()
+
     for key, label in TASK_CATEGORY.items():
-        if key in short:
+        if key in all_raw:
             category = label
             break
 
-    source = "系统"
     for key, label in SOURCE_LABEL.items():
-        if key in short.lower():
+        if key in all_raw:
             source = label
             break
-
-    if source == "系统" and plugin_id:
-        for key, label in SOURCE_LABEL.items():
-            if key in plugin_id.lower():
-                source = label
-                break
 
     return category, source
 
@@ -166,7 +160,7 @@ def _task_type_label(task_type: str | None, plugin_id: str | None) -> str:
 class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.8.0"
+    plugin_version = "1.8.2"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -332,23 +326,50 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         return dict(config or {})
 
     @staticmethod
+    def _deep_find(d: Any, keys: tuple[str, ...]) -> str | None:
+        if not isinstance(d, dict):
+            return None
+        for k, v in d.items():
+            if k.lower() in keys and v and str(v).strip():
+                return str(v).strip()
+        for k, v in d.items():
+            if isinstance(v, dict):
+                found = DingdingBotAutomationPlugin._deep_find(v, keys)
+                if found:
+                    return found
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict):
+                        found = DingdingBotAutomationPlugin._deep_find(item, keys)
+                        if found:
+                            return found
+        return None
+
+    @staticmethod
     def _extract_task_label(event: dict[str, Any], payload: dict[str, Any]) -> str:
         task_id = str(event.get("task_id") or payload.get("task_id") or "")
-        display_name = ""
-        for key in ("task_name", "name", "display_name", "label", "title"):
-            for container in (event, payload):
-                if isinstance(container, dict):
-                    val = container.get(key)
-                    if val and str(val).strip():
-                        display_name = str(val).strip()
-                        break
-            if display_name:
-                break
-        if task_id and display_name:
-            return f"#{task_id} {display_name}"
+
+        task_name_keys = ("task_name", "task_display_name", "display_name", "display_title",
+                          "full_name", "full_title", "subtitle", "task_title", "description")
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+
+        task_name = None
+        for src in (payload, event, data):
+            if isinstance(src, dict):
+                task_name = DingdingBotAutomationPlugin._deep_find(src, task_name_keys)
+                if task_name:
+                    break
+
+        if not task_name:
+            summary = str(payload.get("summary") or payload.get("message") or "").strip()
+            if summary and len(summary) <= 80 and summary.lower() not in ("task completed", "任务完成"):
+                task_name = summary
+
+        if task_id and task_name:
+            return f"#{task_id} {task_name}"
         if task_id:
             return f"#{task_id}"
-        return display_name or "任务"
+        return task_name or "任务"
 
     @staticmethod
     def _build_message(event: dict[str, Any]) -> tuple[str, str]:
@@ -371,8 +392,8 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         created_at = str(event.get("created_at") or payload.get("created_at") or "")
 
         lines: list[str] = []
-        lines.append(f"{source} {task_category}通知")
-        lines.append(f"影视名称：{resource_name}")
+        lines.append(f"📌 {source} {task_category}通知")
+        lines.append(f"🎬 影视名称：{resource_name}")
 
         if event_type == "task.completed":
             saved_count = data.get("saved_count") or data.get("transferred_count")
@@ -383,11 +404,14 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
 
             action = task_category if task_category != "任务" else "处理"
             if saved_count and target_path:
-                lines.append(f"已{action}：{saved_count}项到{target_path}")
+                lines.append(f"✅ 已{action}：{saved_count}项到{target_path}")
             elif saved_count:
-                lines.append(f"已{action}：{saved_count}项")
+                lines.append(f"✅ 已{action}：{saved_count}项")
+            else:
+                lines.append(f"✅ 已{action}：未获取到统计信息")
+
             if skipped_count:
-                lines.append(f"已跳过：{skipped_count}项")
+                lines.append(f"⏭️  已跳过：{skipped_count}项")
 
             artifacts = payload.get("artifacts") or []
             episode_numbers: list[int] = []
@@ -419,16 +443,23 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
             latest_ep = max(episode_numbers) if episode_numbers else None
 
             if episode_range:
-                lines.append(f"详细剧集信息：{episode_range}")
+                lines.append(f"📺 详细剧集信息：{episode_range}")
+            else:
+                lines.append(f"📺 详细剧集信息：未获取")
+
             if latest_ep:
-                lines.append(f"最新剧集：{latest_ep}")
-            elif not episode_range and artifact_names:
+                lines.append(f"🔢 最新剧集：第{latest_ep}集")
+            elif artifact_names:
                 latest_name = artifact_names[-1]
                 if latest_name != resource_name:
-                    lines.append(f"最新剧集名称：{latest_name}")
+                    lines.append(f"🔢 最新剧集：{latest_name}")
+                else:
+                    lines.append(f"🔢 最新剧集：未获取")
+            else:
+                lines.append(f"🔢 最新剧集：未获取")
 
-            if target_path and not any("输出路径" in l or "已转存" in l or "处理" in l for l in lines):
-                lines.append(f"输出路径：{target_path}")
+            if target_path and not any(target_path in l for l in lines):
+                lines.append(f"📂 输出路径：{target_path}")
 
         elif event_type == "task.failed":
             error = str(
@@ -437,27 +468,27 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
                 or summary
                 or "未知错误"
             ).strip()
-            lines.append(f"失败原因：{error}")
+            lines.append(f"❌ 失败原因：{error}")
             if created_at:
-                lines.append(f"失败时间：{_fmt_time(created_at)}")
+                lines.append(f"🕐 失败时间：{_fmt_time(created_at)}")
 
         elif event_type == "task.started":
             if created_at:
-                lines.append(f"开始时间：{_fmt_time(created_at)}")
+                lines.append(f"🕐 开始时间：{_fmt_time(created_at)}")
 
         elif event_type == "task.created":
             if created_at:
-                lines.append(f"创建时间：{_fmt_time(created_at)}")
+                lines.append(f"🕐 创建时间：{_fmt_time(created_at)}")
 
         if summary and event_type not in ("task.completed",):
-            lines.append(f"状态：{summary}")
+            lines.append(f"📝 状态：{summary}")
 
         plugin_status = DingdingBotAutomationPlugin._collect_plugin_status(payload)
         if plugin_status:
-            lines.append("插件状态：")
+            lines.append("🔌 插件状态：")
             for label, success, message in plugin_status:
-                status_icon = "成功" if success else "失败"
-                lines.append(f"  {label} {status_icon}")
+                status_icon = "✅" if success else "❌"
+                lines.append(f"   {status_icon} {label}")
 
         return header, "\n".join(lines)
 
