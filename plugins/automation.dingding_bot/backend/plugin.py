@@ -1,28 +1,34 @@
+"""钉钉 Bot 通知自动化插件后端入口。"""
+
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
 import json
-import threading
 import time
 import urllib.parse
 import urllib.request
-import urllib.error
 from typing import Any
 
 from core.sdk import AutomationProvider, BasePlugin, OperationResult
 
-DEFAULT_EVENTS = ["task.completed", "task.failed"]
 
-EVENT_CATEGORY = {
+DEFAULT_EVENTS = [
+    "task.completed",
+    "task.failed",
+    "task.started",
+    "task.created",
+]
+
+EVENT_CATEGORY: dict[str, str] = {
     "task.completed": "任务完成",
     "task.failed": "任务失败",
     "task.started": "任务开始",
     "task.created": "任务创建",
 }
 
-CATEGORY_EMOJI = {
+CATEGORY_EMOJI: dict[str, str] = {
     "任务完成": "✅",
     "任务失败": "❌",
     "任务开始": "▶️",
@@ -30,19 +36,14 @@ CATEGORY_EMOJI = {
     "系统通知": "🔔",
 }
 
-MERGE_WINDOW_SECONDS = 5
-
 
 class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.1.0"
+    plugin_version = "1.3.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
-        self._pending: list[dict[str, Any]] = []
-        self._lock = threading.Lock()
-        self._flush_timer: threading.Timer | None = None
 
     def set_runtime_config(self, config: dict[str, Any]) -> None:
         self._runtime_config = self._normalize_runtime_config(config)
@@ -72,13 +73,16 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         return values or list(DEFAULT_EVENTS)
 
     def test_notification(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if not self._is_configured():
+        config = self._normalize_runtime_config(payload)
+        webhook_url = str(config.get("webhook_url") or "").strip()
+        if not webhook_url:
             return OperationResult(
                 success=False,
                 message="通知测试失败：缺少 webhook_url 配置。",
             ).model_dump(mode="json")
         try:
-            self._send_to_dingtalk(
+            self._send_to_dingtalk_with_config(
+                config,
                 "🔔 [测试] 钉钉 Bot 通知",
                 "这是一条测试消息。如果收到，说明钉钉 Bot 配置正确、推送链路正常。",
             )
@@ -97,19 +101,10 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         title, content = self._build_message(event)
 
         if self._is_configured():
-            category = self._category_for(event_type)
-            with self._lock:
-                self._pending.append({
-                    "category": category,
-                    "title": title,
-                    "content": content,
-                    "time": time.strftime("%H:%M:%S"),
-                })
-                if self._flush_timer is not None:
-                    self._flush_timer.cancel()
-                self._flush_timer = threading.Timer(MERGE_WINDOW_SECONDS, self._flush_pending)
-                self._flush_timer.daemon = True
-                self._flush_timer.start()
+            try:
+                self._send_to_dingtalk(title, content)
+            except Exception:
+                pass
 
         return OperationResult(
             success=True,
@@ -122,57 +117,17 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
             },
         ).model_dump(mode="json")
 
-    def _flush_pending(self) -> None:
-        with self._lock:
-            if not self._pending:
-                return
-            items = list(self._pending)
-            self._pending = []
-            self._flush_timer = None
-
-        try:
-            title, body = self._format_merged(items)
-            self._send_to_dingtalk(title, body)
-        except Exception:
-            pass
-
-    @staticmethod
-    def _format_merged(items: list[dict[str, Any]]) -> tuple[str, str]:
-        if len(items) == 1:
-            item = items[0]
-            emoji = CATEGORY_EMOJI.get(item["category"], "🔔")
-            return f"{emoji} {item['title']}", item["content"]
-
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for item in items:
-            grouped.setdefault(item["category"], []).append(item)
-
-        summary_parts = []
-        for category in ["任务完成", "任务失败", "任务开始", "任务创建", "系统通知"]:
-            if category in grouped:
-                count = len(grouped[category])
-                emoji = CATEGORY_EMOJI.get(category, "🔔")
-                summary_parts.append(f"{emoji}{category}×{count}")
-
-        title = f"📢 T3 通知 ({len(items)}条) " + " ".join(summary_parts)
-
-        lines: list[str] = []
-        for category, cat_items in grouped.items():
-            emoji = CATEGORY_EMOJI.get(category, "🔔")
-            lines.append(f"【{emoji} {category}】")
-            for idx, item in enumerate(cat_items, 1):
-                lines.append(f"  {idx}. [{item['time']}] {item['content']}")
-            lines.append("")
-
-        return title, "\n".join(lines).rstrip()
-
     def _is_configured(self) -> bool:
         return bool(str(self._runtime_config.get("webhook_url") or "").strip())
 
     def _send_to_dingtalk(self, title: str, content: str) -> None:
-        webhook_url = str(self._runtime_config.get("webhook_url") or "").strip()
-        secret = str(self._runtime_config.get("secret") or "").strip()
-        at_mobiles_raw = str(self._runtime_config.get("at_mobiles") or "").strip()
+        self._send_to_dingtalk_with_config(self._runtime_config, title, content)
+
+    @staticmethod
+    def _send_to_dingtalk_with_config(config: dict[str, Any], title: str, content: str) -> None:
+        webhook_url = str(config.get("webhook_url") or "").strip()
+        secret = str(config.get("secret") or "").strip()
+        at_mobiles_raw = str(config.get("at_mobiles") or "").strip()
         at_mobiles = [m.strip() for m in at_mobiles_raw.split(",") if m.strip()] if at_mobiles_raw else []
 
         if secret:
@@ -215,6 +170,9 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
     def _build_message(event: dict[str, Any]) -> tuple[str, str]:
         event_type = str(event.get("event_type") or "unknown")
         payload = dict(event.get("payload") or {})
+        category = EVENT_CATEGORY.get(event_type, "系统通知")
+        emoji = CATEGORY_EMOJI.get(category, "🔔")
+
         task_name = str(
             payload.get("task_name")
             or payload.get("title")
@@ -233,20 +191,20 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
             content = f"{task_name} 已执行完成。"
             if summary:
                 content = f"{content} {summary}"
-            return "[任务完成]", content
+            return f"{emoji} T3 - 任务完成", content
 
         if event_type == "task.failed":
-            return "[任务失败]", f"{task_name} 执行失败：{error_message}"
+            return f"{emoji} T3 - 任务失败", f"{task_name} 执行失败：{error_message}"
 
         if event_type == "task.started":
-            return "[任务开始]", f"{task_name} 已开始执行。"
+            return f"{emoji} T3 - 任务开始", f"{task_name} 已开始执行。"
 
         if event_type == "task.created":
-            return "[任务创建]", f"已创建新任务：{task_name}"
+            return f"{emoji} T3 - 任务创建", f"已创建新任务：{task_name}"
 
         if summary:
-            return "[系统通知]", f"{task_name}：{summary}"
-        return "[系统通知]", f"{task_name} 触发事件：{event_type}"
+            return f"{emoji} T3 - 系统通知", f"{task_name}：{summary}"
+        return f"{emoji} T3 - 系统通知", f"{task_name} 触发事件：{event_type}"
 
 
 plugin = DingdingBotAutomationPlugin()
