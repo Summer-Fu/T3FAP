@@ -161,11 +161,12 @@ def _task_type_label(task_type: str | None, plugin_id: str | None) -> str:
 class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.8.4"
+    plugin_version = "1.8.5"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
-        self._sent_cache: dict[str, float] = {}
+        self._pending: dict[str, dict[str, Any]] = {}
+        self._sent: dict[str, float] = {}
 
     def set_runtime_config(self, config: dict[str, Any]) -> None:
         self._runtime_config = self._normalize_runtime_config(config)
@@ -218,39 +219,121 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
                 message=f"通知测试失败：{exc}",
             ).model_dump(mode="json")
 
+    @staticmethod
+    def _event_richness(event: dict[str, Any]) -> int:
+        payload = dict(event.get("payload") or {})
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        score = 0
+        if data.get("saved_count") is not None or data.get("transferred_count") is not None:
+            score += 10
+        if data.get("skipped_count"):
+            score += 5
+        if data.get("target_path") or data.get("save_path"):
+            score += 3
+        if data.get("share_results"):
+            score += 8
+        if payload.get("artifacts"):
+            score += 8
+        if payload.get("summary"):
+            score += 2
+        for key in ("task_name", "display_name", "task_display_name", "full_name", "description"):
+            for container in (event, payload, data):
+                if isinstance(container, dict) and container.get(key):
+                    score += 15
+                    break
+        return score
+
+    @staticmethod
+    def _merge_events(e1: dict[str, Any], e2: dict[str, Any]) -> dict[str, Any]:
+        import copy
+        base = copy.deepcopy(e1)
+        extra = e2
+        p1 = base.get("payload") if isinstance(base.get("payload"), dict) else {}
+        p2 = extra.get("payload") if isinstance(extra.get("payload"), dict) else {}
+        d1 = p1.get("data") if isinstance(p1.get("data"), dict) else {}
+        d2 = p2.get("data") if isinstance(p2.get("data"), dict) else {}
+
+        for key in ("artifacts", "summary", "message"):
+            if not p1.get(key) and p2.get(key):
+                p1[key] = p2[key]
+
+        for key in ("saved_count", "transferred_count", "skipped_count", "renamed_count",
+                     "filtered_count", "target_path", "save_path", "share_results", "post_plugins"):
+            if d1.get(key) is None and d2.get(key) is not None:
+                d1[key] = d2[key]
+
+        for container_key, container in (("payload", p1),):
+            for key in ("task_name", "display_name", "task_display_name", "full_name", "description", "name", "title"):
+                if not base.get(key) and extra.get(key):
+                    base[key] = extra[key]
+                if not p1.get(key) and p2.get(key):
+                    p1[key] = p2[key]
+                if not d1.get(key) and d2.get(key):
+                    d1[key] = d2[key]
+
+        if d1:
+            p1["data"] = d1
+        if p1:
+            base["payload"] = p1
+        return base
+
+    def _flush_pending(self) -> None:
+        now = time.time()
+        keys_to_send: list[str] = []
+        for key, info in self._pending.items():
+            if now - info["timestamp"] >= 2:
+                keys_to_send.append(key)
+        for key in keys_to_send:
+            info = self._pending.pop(key)
+            event = info["event"]
+            title, content = self._build_message(event)
+            if self._is_configured():
+                try:
+                    self._send_to_dingtalk(title, content)
+                except Exception:
+                    pass
+            self._sent[key] = now
+
     def handle(self, event: dict[str, Any]) -> dict[str, Any]:
         event_type = str(event.get("event_type") or "unknown")
         task_id = str(event.get("task_id") or (event.get("payload") or {}).get("task_id") or "")
         dedup_key = f"{task_id}:{event_type}"
 
+        self._flush_pending()
+
         now = time.time()
-        if dedup_key in self._sent_cache and (now - self._sent_cache[dedup_key]) < 10:
+        if dedup_key in self._sent and (now - self._sent[dedup_key]) < 30:
             return OperationResult(
                 success=True,
-                message=f"{self.plugin_name} 跳过重复事件：{event_type}",
+                message=f"{self.plugin_name} 跳过重复事件（已发送）：{event_type}",
                 data={"event_type": event_type, "dedup_key": dedup_key, "skipped": True},
             ).model_dump(mode="json")
 
-        self._sent_cache[dedup_key] = now
-        if len(self._sent_cache) > 100:
-            self._sent_cache = {k: v for k, v in self._sent_cache.items() if now - v < 60}
+        if dedup_key in self._pending:
+            existing = self._pending[dedup_key]
+            new_score = self._event_richness(event)
+            old_score = self._event_richness(existing["event"])
+            if new_score > old_score:
+                merged = self._merge_events(existing["event"], event)
+                existing["event"] = merged
+                existing["timestamp"] = now
+            elif new_score == old_score:
+                existing["timestamp"] = now
+        else:
+            self._pending[dedup_key] = {"timestamp": now, "event": event}
 
-        title, content = self._build_message(event)
+        if len(self._sent) > 200:
+            self._sent = {k: v for k, v in self._sent.items() if now - v < 300}
 
-        if self._is_configured():
-            try:
-                self._send_to_dingtalk(title, content)
-            except Exception:
-                pass
+        self._flush_pending()
 
         return OperationResult(
             success=True,
-            message=f"{self.plugin_name} 已处理事件：{event_type}",
+            message=f"{self.plugin_name} 已接收事件：{event_type}（将在延迟后合并发送）",
             data={
                 "event_type": event_type,
-                "title": title,
-                "content": content,
-                "configured": self._is_configured(),
+                "dedup_key": dedup_key,
+                "pending_count": len(self._pending),
             },
         ).model_dump(mode="json")
 
