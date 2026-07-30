@@ -36,7 +36,7 @@ MERGE_WINDOW_SECONDS = 5
 class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -70,6 +70,27 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         raw = str(self._runtime_config.get("enabled_events") or ",".join(DEFAULT_EVENTS))
         values = [item.strip() for item in raw.split(",") if item.strip()]
         return values or list(DEFAULT_EVENTS)
+
+    def test_notification(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_configured():
+            return OperationResult(
+                success=False,
+                message="通知测试失败：缺少 webhook_url 配置。",
+            ).model_dump(mode="json")
+        try:
+            self._send_to_dingtalk(
+                "🔔 [测试] 钉钉 Bot 通知",
+                "这是一条测试消息。如果收到，说明钉钉 Bot 配置正确、推送链路正常。",
+            )
+            return OperationResult(
+                success=True,
+                message="通知测试成功，请检查钉钉群是否收到测试消息。",
+            ).model_dump(mode="json")
+        except Exception as exc:
+            return OperationResult(
+                success=False,
+                message=f"通知测试失败：{exc}",
+            ).model_dump(mode="json")
 
     def handle(self, event: dict[str, Any]) -> dict[str, Any]:
         event_type = str(event.get("event_type") or "unknown")
