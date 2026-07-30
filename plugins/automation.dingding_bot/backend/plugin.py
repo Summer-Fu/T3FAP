@@ -84,13 +84,14 @@ def _fmt_time(iso_str: str | None) -> str:
 
 def _parse_episode_number(name: str) -> int | None:
     patterns = [
+        r'S\d{1,2}E(\d{1,4})',
         r'第(\d{1,4})集',
         r'EP(\d{1,4})',
-        r'E(\d{1,4})',
         r'\[(\d{1,4})\]',
         r'(\d{1,4})\.(?:mkv|mp4|avi|mov|ts|wmv)',
         r'[-_ ](\d{1,4})[-_ .]',
         r'^(\d{1,4})[-_ .]',
+        r'[^\d]E(\d{1,4})[^\d]',
     ]
     for pattern in patterns:
         match = re.search(pattern, name, re.IGNORECASE)
@@ -160,10 +161,11 @@ def _task_type_label(task_type: str | None, plugin_id: str | None) -> str:
 class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.8.2"
+    plugin_version = "1.8.4"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
+        self._sent_cache: dict[str, float] = {}
 
     def set_runtime_config(self, config: dict[str, Any]) -> None:
         self._runtime_config = self._normalize_runtime_config(config)
@@ -218,6 +220,21 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
 
     def handle(self, event: dict[str, Any]) -> dict[str, Any]:
         event_type = str(event.get("event_type") or "unknown")
+        task_id = str(event.get("task_id") or (event.get("payload") or {}).get("task_id") or "")
+        dedup_key = f"{task_id}:{event_type}"
+
+        now = time.time()
+        if dedup_key in self._sent_cache and (now - self._sent_cache[dedup_key]) < 10:
+            return OperationResult(
+                success=True,
+                message=f"{self.plugin_name} 跳过重复事件：{event_type}",
+                data={"event_type": event_type, "dedup_key": dedup_key, "skipped": True},
+            ).model_dump(mode="json")
+
+        self._sent_cache[dedup_key] = now
+        if len(self._sent_cache) > 100:
+            self._sent_cache = {k: v for k, v in self._sent_cache.items() if now - v < 60}
+
         title, content = self._build_message(event)
 
         if self._is_configured():
@@ -362,8 +379,10 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
 
         if not task_name:
             summary = str(payload.get("summary") or payload.get("message") or "").strip()
+            blacklist = ("转存", "下载", "项到", "已完成", "completed", "跳过", "任务")
             if summary and len(summary) <= 80 and summary.lower() not in ("task completed", "任务完成"):
-                task_name = summary
+                if not any(b in summary for b in blacklist):
+                    task_name = summary
 
         if task_id and task_name:
             return f"#{task_id} {task_name}"
@@ -396,21 +415,25 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         lines.append(f"🎬 影视名称：{resource_name}")
 
         if event_type == "task.completed":
-            saved_count = data.get("saved_count") or data.get("transferred_count")
-            skipped_count = data.get("skipped_count")
-            renamed_count = data.get("renamed_count")
-            filtered_count = data.get("filtered_count")
+            saved_raw = data.get("saved_count") if data.get("saved_count") is not None else data.get("transferred_count")
+            saved_count = int(saved_raw) if saved_raw is not None else None
+            skipped_raw = data.get("skipped_count")
+            skipped_count = int(skipped_raw) if skipped_raw is not None else None
             target_path = data.get("target_path") or data.get("save_path")
 
             action = task_category if task_category != "任务" else "处理"
-            if saved_count and target_path:
+            is_no_update = saved_count == 0 and skipped_count and skipped_count > 0
+
+            if is_no_update:
+                lines.append(f"🔄 本次无更新（已存在相同文件）")
+            elif saved_count is not None and target_path:
                 lines.append(f"✅ 已{action}：{saved_count}项到{target_path}")
-            elif saved_count:
+            elif saved_count is not None:
                 lines.append(f"✅ 已{action}：{saved_count}项")
             else:
                 lines.append(f"✅ 已{action}：未获取到统计信息")
 
-            if skipped_count:
+            if skipped_count is not None and skipped_count > 0:
                 lines.append(f"⏭️  已跳过：{skipped_count}项")
 
             artifacts = payload.get("artifacts") or []
