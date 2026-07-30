@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -81,6 +82,50 @@ def _fmt_time(iso_str: str | None) -> str:
         return iso_str
 
 
+def _parse_episode_number(name: str) -> int | None:
+    patterns = [
+        r'第(\d{1,4})集',
+        r'EP(\d{1,4})',
+        r'E(\d{1,4})',
+        r'\[(\d{1,4})\]',
+        r'(\d{1,4})\.(?:mkv|mp4|avi|mov|ts|wmv)',
+        r'[-_ ](\d{1,4})[-_ .]',
+        r'^(\d{1,4})[-_ .]',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, name, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                continue
+    return None
+
+
+def _format_episode_ranges(numbers: list[int]) -> str:
+    if not numbers:
+        return ""
+    sorted_nums = sorted(set(numbers))
+    ranges: list[str] = []
+    start = sorted_nums[0]
+    prev = sorted_nums[0]
+    for n in sorted_nums[1:]:
+        if n == prev + 1:
+            prev = n
+        else:
+            if start == prev:
+                ranges.append(str(start))
+            else:
+                ranges.append(f"{start}-{prev}")
+            start = n
+            prev = n
+    if start == prev:
+        ranges.append(str(start))
+    else:
+        ranges.append(f"{start}-{prev}")
+    return "、".join(ranges)
+
+
 def _parse_category_and_source(task_type: str | None, plugin_id: str | None) -> tuple[str, str]:
     raw = (task_type or plugin_id or "").strip()
     short = raw.replace("task.", "").replace("download.", "").replace("automation.", "")
@@ -121,7 +166,7 @@ def _task_type_label(task_type: str | None, plugin_id: str | None) -> str:
 class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.6.0"
+    plugin_version = "1.8.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -246,19 +291,25 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         share_results = (data if isinstance(data, dict) else {}).get("share_results") or []
 
         if share_results and isinstance(share_results, list):
-            name = share_results[0].get("share_name") or share_results[0].get("title")
-            if name:
-                return str(name)
+            for sr in share_results:
+                if isinstance(sr, dict):
+                    name = sr.get("share_name") or sr.get("title") or sr.get("name")
+                    if name and str(name).strip():
+                        return str(name).strip()
 
         if artifacts and isinstance(artifacts, list):
-            title = artifacts[0].get("title")
-            if title:
-                return str(title)
+            for art in artifacts:
+                if isinstance(art, dict):
+                    title = art.get("title") or art.get("name")
+                    if title and str(title).strip() and not re.match(r'^\d+\.(mkv|mp4|avi)$', str(title), re.IGNORECASE):
+                        return str(title).strip()
 
         for key in ("share_name", "resource_name", "name", "title", "task_name"):
-            val = payload.get(key) or event.get(key) or data.get(key)
-            if val:
-                return str(val)
+            for container in (payload, event, data if isinstance(data, dict) else {}):
+                if isinstance(container, dict):
+                    val = container.get(key)
+                    if val and str(val).strip():
+                        return str(val).strip()
 
         task_id = str(event.get("task_id") or payload.get("task_id") or "")
         return f"任务 #{task_id}" if task_id else "未命名任务"
@@ -281,6 +332,25 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         return dict(config or {})
 
     @staticmethod
+    def _extract_task_label(event: dict[str, Any], payload: dict[str, Any]) -> str:
+        task_id = str(event.get("task_id") or payload.get("task_id") or "")
+        display_name = ""
+        for key in ("task_name", "name", "display_name", "label", "title"):
+            for container in (event, payload):
+                if isinstance(container, dict):
+                    val = container.get(key)
+                    if val and str(val).strip():
+                        display_name = str(val).strip()
+                        break
+            if display_name:
+                break
+        if task_id and display_name:
+            return f"#{task_id} {display_name}"
+        if task_id:
+            return f"#{task_id}"
+        return display_name or "任务"
+
+    @staticmethod
     def _build_message(event: dict[str, Any]) -> tuple[str, str]:
         event_type = str(event.get("event_type") or "unknown")
         payload = dict(event.get("payload") or {})
@@ -294,7 +364,8 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         plugin_id = str(event.get("plugin_id") or "")
         task_category, source = _parse_category_and_source(task_type, plugin_id)
 
-        header = f"{emoji} T3 - {category}"
+        task_label = DingdingBotAutomationPlugin._extract_task_label(event, payload)
+        header = f"{emoji} T3 - {category} - {task_label}"
         resource_name = DingdingBotAutomationPlugin._extract_resource_name(event, payload)
         summary = str(payload.get("summary") or payload.get("message") or "").strip()
         created_at = str(event.get("created_at") or payload.get("created_at") or "")
@@ -305,26 +376,59 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
 
         if event_type == "task.completed":
             saved_count = data.get("saved_count") or data.get("transferred_count")
+            skipped_count = data.get("skipped_count")
+            renamed_count = data.get("renamed_count")
+            filtered_count = data.get("filtered_count")
             target_path = data.get("target_path") or data.get("save_path")
+
+            action = task_category if task_category != "任务" else "处理"
             if saved_count and target_path:
-                action = task_category if task_category != "任务" else "处理"
                 lines.append(f"已{action}：{saved_count}项到{target_path}")
             elif saved_count:
-                action = task_category if task_category != "任务" else "处理"
                 lines.append(f"已{action}：{saved_count}项")
+            if skipped_count:
+                lines.append(f"已跳过：{skipped_count}项")
 
             artifacts = payload.get("artifacts") or []
+            episode_numbers: list[int] = []
+            artifact_names: list[str] = []
             if artifacts and isinstance(artifacts, list):
-                latest = artifacts[-1] if artifacts else {}
-                artifact_title = latest.get("title") or latest.get("name") or ""
-                artifact_path = latest.get("path") or ""
-                if artifact_title and artifact_title != resource_name:
-                    lines.append(f"最新剧集名称：{artifact_title}")
-                elif artifact_path:
-                    lines.append(f"输出路径：{artifact_path}")
+                for art in artifacts:
+                    if isinstance(art, dict):
+                        a_title = str(art.get("title") or art.get("name") or "")
+                        a_path = str(art.get("path") or "")
+                        if a_title:
+                            artifact_names.append(a_title)
+                            ep = _parse_episode_number(a_title)
+                            if ep:
+                                episode_numbers.append(ep)
+                        if not episode_numbers and a_path:
+                            ep = _parse_episode_number(a_path)
+                            if ep:
+                                episode_numbers.append(ep)
 
-            if created_at:
-                lines.append(f"剧集更新日期：{_fmt_time(created_at)}")
+            share_results = data.get("share_results") or []
+            if share_results and isinstance(share_results, list):
+                for sr in share_results:
+                    if isinstance(sr, dict):
+                        sr_name = str(sr.get("share_name") or "")
+                        if sr_name and sr_name not in artifact_names:
+                            artifact_names.append(sr_name)
+
+            episode_range = _format_episode_ranges(episode_numbers)
+            latest_ep = max(episode_numbers) if episode_numbers else None
+
+            if episode_range:
+                lines.append(f"详细剧集信息：{episode_range}")
+            if latest_ep:
+                lines.append(f"最新剧集：{latest_ep}")
+            elif not episode_range and artifact_names:
+                latest_name = artifact_names[-1]
+                if latest_name != resource_name:
+                    lines.append(f"最新剧集名称：{latest_name}")
+
+            if target_path and not any("输出路径" in l or "已转存" in l or "处理" in l for l in lines):
+                lines.append(f"输出路径：{target_path}")
 
         elif event_type == "task.failed":
             error = str(
