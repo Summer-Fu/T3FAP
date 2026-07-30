@@ -1,0 +1,91 @@
+{
+  "id": "automation.dingding_bot",
+  "name": "钉钉 Bot",
+  "version": "1.0.0",
+  "category": "automation",
+  "description": "监听任务和系统事件，通过钉钉群机器人发送通知消息。支持加签安全设置、@指定人。",
+  "author": "T3FAP Community",
+  "homepage": "",
+  "license": "MIT",
+  "core_version": ">=1.0.0 <2.0.0",
+  "contract_version": "1.0",
+  "capabilities": [
+    "automation.event_handler",
+    "notification.dingtalk"
+  ],
+  "backend": {
+    "entry": "backend.plugin:plugin"
+  },
+  "permissions": [
+    "network",
+    "secret.read"
+  ],
+  "dependencies": [],
+  "optional_dependencies": [],
+  "config_schema": [
+    {
+      "key": "enabled",
+      "label": "启用插件",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "是否启用钉钉 Bot 通知自动化。",
+      "secret": false,
+      "group": "基础设置"
+    },
+    {
+      "key": "webhook_url",
+      "label": "机器人回调地址",
+      "type": "string",
+      "required": true,
+      "default": "",
+      "description": "钉钉群机器人的 webhook 回调地址。",
+      "secret": true,
+      "group": "基础设置"
+    },
+    {
+      "key": "secret",
+      "label": "加签密钥",
+      "type": "string",
+      "required": false,
+      "default": "",
+      "description": "启用安全加签时使用的签名密钥（以 SEC 开头）。如果是关键词或 IP 白名单模式，此项留空。",
+      "secret": true,
+      "group": "基础设置"
+    },
+    {
+      "key": "enabled_events",
+      "label": "启用事件列表",
+      "type": "string",
+      "required": false,
+      "default": "task.completed,task.failed",
+      "description": "需要发送通知的事件类型列表，多个值用英文逗号分隔。",
+      "secret": false,
+      "group": "通知设置"
+    },
+    {
+      "key": "at_mobiles",
+      "label": "提醒手机号列表",
+      "type": "string",
+      "required": false,
+      "default": "",
+      "description": "需要在钉钉消息中 @ 的手机号列表，多个值用英文逗号分隔。",
+      "secret": false,
+      "group": "通知设置"
+    }
+  ],
+  "ui": {
+    "menus": [],
+    "settings_sections": [
+      {
+        "key": "notification.dingtalk",
+        "title": "钉钉 Bot 通知"
+      }
+    ],
+    "task_templates": []
+  },
+  "healthcheck": {
+    "enabled": true,
+    "interval_seconds": 300
+  }
+}
