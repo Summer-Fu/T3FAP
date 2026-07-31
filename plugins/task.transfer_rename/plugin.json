@@ -1,0 +1,55 @@
+{
+  "id": "task.transfer_rename",
+  "name": "转存前文件重命名任务插件",
+  "version": "0.1.0",
+  "category": "task",
+  "description": "在网盘转存前对文件进行重命名处理，支持序号补零、添加前缀后缀、字符替换等标准化操作",
+  "core_version": ">=1.0.0 <2.0.0",
+  "contract_version": "1.0",
+  "capabilities": [
+    "task.template",
+    "task.executor",
+    "task.from_resource"
+  ],
+  "backend": {
+    "entry": "backend.plugin:plugin"
+  },
+  "permissions": [
+    "task.dispatch",
+    "network"
+  ],
+  "dependencies": [],
+  "config_schema": [
+    {
+      "key": "default_target_path",
+      "label": "默认转存路径",
+      "type": "string",
+      "required": false,
+      "default": "/订阅",
+      "description": "文件转存的默认目标路径"
+    },
+    {
+      "key": "default_padding",
+      "label": "默认序号补零位数",
+      "type": "number",
+      "required": false,
+      "default": 2,
+      "description": "集数序号补零的位数（如2位：1→01）"
+    },
+    {
+      "key": "default_naming_template",
+      "label": "默认命名模板",
+      "type": "string",
+      "required": false,
+      "default": "{show_name} - {episode:02d}",
+      "description": "文件名命名模板，支持变量：{show_name}{episode}{ext}{original}"
+    }
+  ],
+  "ui": {
+    "menus": [],
+    "settings_sections": [],
+    "task_templates": [
+      "transfer_rename"
+    ]
+  }
+}
