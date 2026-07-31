@@ -18,6 +18,7 @@ DEFAULT_EVENTS = ["task.completed", "task.failed"]
 
 # 默认 T3 平台 API 配置（当用户未在插件设置中填写时使用）
 DEFAULT_T3_API_BASE = "http://192.168.1.219:8521/api"
+DEFAULT_T3_API_KEY = "t3mt_HlX7EXoEKvMTFitkvMs75QvjCvcZN9t4kT0J-WQ1f5U"
 DEFAULT_T3_API_HEADER = "X-API-Key"
 
 EVENT_CATEGORY = {
@@ -359,7 +360,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.0.9"
+    plugin_version = "2.1.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -397,6 +398,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             api_key = (
                 os.environ.get("T3MT_API_KEY")
                 or os.environ.get("T3_API_KEY")
+                or DEFAULT_T3_API_KEY
                 or ""
             )
         if not api_header:
