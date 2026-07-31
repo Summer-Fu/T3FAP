@@ -355,7 +355,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.0.5"
+    plugin_version = "2.0.7"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -368,11 +368,55 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
     # ==================== 平台本地 API 调用 ====================
 
+    def _get_api_credentials(self) -> tuple[str | None, str | None, str]:
+        """从配置中获取 API 凭据。"""
+        import os
+        config = self._resolve_config()
+        api_base = str(config.get("t3_api_base") or "").strip()
+        api_key = str(config.get("t3_api_key") or "").strip()
+        api_header = str(config.get("t3_api_header") or "X-API-Key").strip()
+        # 兼容环境变量（T3MT_* 优先，然后 T3_*）
+        if not api_base:
+            api_base = (
+                os.environ.get("T3MT_API_BASE")
+                or os.environ.get("T3_API_BASE")
+                or os.environ.get("T3MT_HOST")
+                or ""
+            )
+            # T3MT_HOST 不带 /api 后缀，需要补全
+            if api_base and "T3MT_HOST" in str(api_base):
+                pass  # not needed, checking value below
+            if api_base and "/api" not in api_base:
+                api_base = api_base.rstrip("/") + "/api"
+        if not api_key:
+            api_key = (
+                os.environ.get("T3MT_API_KEY")
+                or os.environ.get("T3_API_KEY")
+                or ""
+            )
+        if api_header == "X-API-Key":
+            env_header = (
+                os.environ.get("T3MT_API_HEADER")
+                or os.environ.get("T3_API_HEADER")
+                or ""
+            )
+            if env_header:
+                api_header = env_header
+        return api_base if api_base else None, api_key if api_key else None, api_header
+
     def _get_api_base(self) -> str | None:
-        """获取平台本地 API 地址。"""
+        """获取平台 API 地址。"""
         if self._api_base:
             return self._api_base
-        # 尝试常见端口
+        # 优先从配置/环境变量获取
+        configured_base, _, _ = self._get_api_credentials()
+        if configured_base:
+            # 去掉末尾的 /api，如果配置里带了的话，统一在 fetch 时处理
+            base = configured_base.rstrip("/")
+            self._api_base = base
+            print(f"[钉钉Bot][平台API] 使用配置的 API 地址: {base}")
+            return base
+        # 尝试常见端口自动探测
         import os
         env_port = os.environ.get("T3_API_PORT") or os.environ.get("PORT")
         candidates = []
@@ -399,17 +443,35 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         return None
 
     def _fetch_api(self, path: str) -> tuple[bool, Any]:
-        """调用平台本地 API，返回 (是否成功, 数据)。"""
+        """调用平台 API，返回 (是否成功, 数据)。"""
         base = self._get_api_base()
         if not base:
             return False, "未探测到平台API地址"
-        url = f"{base}{path}" if path.startswith("/") else f"{base}/{path}"
+        # 构造 URL：base 可能是 https://xxx 或 https://xxx/api
+        # path 可能是 /api/tasks/xxx 或 /tasks/xxx
+        api_base_url = base
+        if "/api" not in base:
+            api_base_url = f"{base}/api"
+        # 去掉 path 开头的 /api（如果有）
+        clean_path = path
+        if clean_path.startswith("/api/"):
+            clean_path = clean_path[4:]
+        elif clean_path.startswith("api/"):
+            clean_path = clean_path[3:]
+        if not clean_path.startswith("/"):
+            clean_path = "/" + clean_path
+        url = f"{api_base_url}{clean_path}"
+        # 获取认证凭据
+        _, api_key, api_header_name = self._get_api_credentials()
+        headers: dict[str, str] = {}
+        if api_key and api_header_name:
+            headers[api_header_name] = api_key
         try:
-            with httpx.Client(timeout=5) as client:
+            with httpx.Client(timeout=10, headers=headers) as client:
                 resp = client.get(url)
                 if resp.status_code == 200:
                     return True, resp.json()
-                return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+                return False, f"HTTP {resp.status_code}: {resp.text[:300]}"
         except Exception as e:
             return False, str(e)
 
@@ -420,6 +482,8 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             f"storage/runtime/task-logs/{execution_id}.log",
             f"storage/runtime/task-logs/{execution_id}",
             f"runtime/task-logs/{execution_id}.log",
+            "data/task-logs/{execution_id}.log",
+            "logs/{execution_id}.log",
         ]
         # 也尝试从环境变量获取项目根目录
         project_root = os.environ.get("PROJECT_ROOT") or os.environ.get("T3_ROOT") or "."
@@ -792,18 +856,31 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             ok, data = self._fetch_api(f"/api/tasks/{task_id}")
             if ok:
                 task_detail = data if isinstance(data, dict) else {}
-                # 如果返回的是 {'item': ...} 格式
-                if "item" in task_detail and isinstance(task_detail["item"], dict):
-                    task_detail = task_detail["item"]
+                # 如果返回的是 {'item': ...} 或 {'data': ...} 格式
+                for wrapper_key in ["item", "data", "task"]:
+                    if wrapper_key in task_detail and isinstance(task_detail[wrapper_key], dict):
+                        task_detail = task_detail[wrapper_key]
+                        break
                 task_detail_status = "已获取"
-                # 把任务详情合并到 all_data 用于深度搜索
                 all_data["task_detail"] = task_detail
+                # 从任务详情中提取并合并 output_payload / share_results / items
+                for merge_key in ["output_payload", "input_payload", "share_results", "items", "artifacts", "results"]:
+                    if merge_key in task_detail and task_detail[merge_key] is not None:
+                        all_data[f"task_detail_{merge_key}"] = task_detail[merge_key]
+                        if merge_key == "output_payload" and isinstance(task_detail[merge_key], dict):
+                            output_payload = _deep_merge_dicts(output_payload, task_detail[merge_key])
                 # 把详情中的 latest_execution 也合进来
                 if "latest_execution" in task_detail and isinstance(task_detail["latest_execution"], dict):
                     all_data["latest_execution"] = task_detail["latest_execution"]
-                    # 从 latest_execution 中提取日志
                     if not execution_id:
                         execution_id = str(task_detail["latest_execution"].get("execution_id") or "")
+                    # 从 latest_execution 中提取 output_payload
+                    le = task_detail["latest_execution"]
+                    for merge_key in ["output_payload", "share_results", "items", "artifacts", "results", "logs"]:
+                        if merge_key in le and le[merge_key] is not None:
+                            all_data[f"latest_exec_{merge_key}"] = le[merge_key]
+                            if merge_key == "output_payload" and isinstance(le[merge_key], dict):
+                                output_payload = _deep_merge_dicts(output_payload, le[merge_key])
             else:
                 task_detail_status = f"获取失败: {data}"
         print(f"[钉钉Bot][平台API] 任务详情: {task_detail_status}")
@@ -815,19 +892,65 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             ok, data = self._fetch_api(f"/api/tasks/executions/{execution_id}")
             if ok:
                 execution_detail = data if isinstance(data, dict) else {}
+                for wrapper_key in ["item", "data", "execution"]:
+                    if wrapper_key in execution_detail and isinstance(execution_detail[wrapper_key], dict):
+                        execution_detail = execution_detail[wrapper_key]
+                        break
                 execution_detail_status = "已获取"
                 all_data["execution_detail"] = execution_detail
-                # 把执行详情的 output_payload 也合进来
-                if "output_payload" in execution_detail and isinstance(execution_detail["output_payload"], dict):
-                    all_data["execution_output_payload"] = execution_detail["output_payload"]
+                # 从执行详情中提取并合并所有关键数据
+                for merge_key in ["output_payload", "input_payload", "share_results", "items", "artifacts", "results", "logs", "log_entries"]:
+                    if merge_key in execution_detail and execution_detail[merge_key] is not None:
+                        all_data[f"exec_{merge_key}"] = execution_detail[merge_key]
+                        if merge_key == "output_payload" and isinstance(execution_detail[merge_key], dict):
+                            output_payload = _deep_merge_dicts(output_payload, execution_detail[merge_key])
             else:
                 execution_detail_status = f"获取失败: {data}"
         print(f"[钉钉Bot][平台API] 执行详情: {execution_detail_status}")
 
-        # 接口3: GET /api/tasks - 任务列表（兜底用）
+        # 接口3: GET /api/tasks/executions/{execution_id}/logs - 执行日志
+        exec_logs_api_status = "此任务不涉及"
+        if execution_id:
+            ok, data = self._fetch_api(f"/api/tasks/executions/{execution_id}/logs")
+            if ok:
+                if isinstance(data, list):
+                    log_text = "\n".join(
+                        str(entry.get("message") or entry) if isinstance(entry, dict) else str(entry)
+                        for entry in data
+                    )
+                    if log_text:
+                        all_data["exec_api_logs"] = data
+                        if not local_logs:
+                            local_logs = log_text
+                            local_logs_status = f"从执行日志API获取 ({len(local_logs)}字)"
+                        exec_logs_api_status = f"已获取 ({len(data)}条)"
+                    else:
+                        exec_logs_api_status = "返回空列表"
+                elif isinstance(data, dict):
+                    log_entries = data.get("logs") or data.get("log_entries") or data.get("items") or []
+                    if isinstance(log_entries, list) and log_entries:
+                        log_text = "\n".join(
+                            str(e.get("message") or e) if isinstance(e, dict) else str(e)
+                            for e in log_entries
+                        )
+                        if log_text:
+                            all_data["exec_api_logs"] = log_entries
+                            if not local_logs:
+                                local_logs = log_text
+                                local_logs_status = f"从执行日志API获取 ({len(local_logs)}字)"
+                        exec_logs_api_status = f"已获取 ({len(log_entries)}条)"
+                    else:
+                        exec_logs_api_status = "返回无日志"
+                else:
+                    exec_logs_api_status = f"返回格式未知: {type(data).__name__}"
+            else:
+                exec_logs_api_status = f"获取失败: {data}"
+        print(f"[钉钉Bot][平台API] 执行日志API: {exec_logs_api_status}")
+
+        # 接口4: GET /api/tasks - 任务列表（兜底用）
         tasks_list_status = "此任务不涉及"
 
-        # 接口4: 从本地文件系统读取任务执行日志
+        # 接口5: 从本地文件系统读取任务执行日志
         local_logs = ""
         local_logs_status = "此任务不涉及"
         if execution_id:
@@ -1407,7 +1530,8 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         lines.append("═" * 15 + " 平台接口获取状态 " + "═" * 15)
         lines.append(f"📋 GET /api/tasks/{task_id}（任务详情）: {task_detail_status}")
         lines.append(f"⚙️  GET /api/tasks/executions/{execution_id}（执行详情）: {execution_detail_status}")
-        lines.append(f"📜 GET /api/tasks（任务列表）: {tasks_list_status}")
+        lines.append(f"📜 GET /api/tasks/executions/{execution_id}/logs（执行日志）: {exec_logs_api_status}")
+        lines.append(f"📋 GET /api/tasks（任务列表）: {tasks_list_status}")
         lines.append(f"📝 本地日志文件读取: {local_logs_status}")
 
         # ==================== 任务执行滚动日志 ====================
