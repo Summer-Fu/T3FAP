@@ -4,7 +4,6 @@ import base64
 import hashlib
 import hmac
 import json
-import threading
 import time
 import urllib.parse
 from typing import Any
@@ -47,22 +46,16 @@ RESOURCE_KIND_LABEL = {
     "share_download": "分享下载",
 }
 
-MERGE_WINDOW_SECONDS = 5
-
 
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.9.3"
+    plugin_version = "1.9.4"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
-        self._pending: list[dict[str, Any]] = []
-        self._lock = threading.Lock()
-        self._flush_timer: threading.Timer | None = None
 
     def _resolve_config(self, override: dict[str, Any] | None = None) -> dict[str, Any]:
-        """草稿配置优先，已保存配置兜底"""
         merged = dict(self._runtime_config)
         if override:
             merged.update(dict(override or {}))
@@ -73,7 +66,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         self._runtime_config = normalized
         keys = list(normalized.keys())
         has_webhook = bool(str(normalized.get("webhook_url") or "").strip())
-        print(f"[钉钉Bot] set_runtime_config 被调用，keys={keys}, webhook已配置={has_webhook}")
+        print(f"[钉钉Bot] set_runtime_config: keys={keys}, webhook已配置={has_webhook}")
 
     def validate_runtime_config(self, config: dict[str, Any]) -> OperationResult:
         normalized = self._normalize_runtime_config(config)
@@ -118,6 +111,8 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 message="通知测试成功，请检查钉钉群是否收到测试消息。",
             ).model_dump(mode="json")
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
             return OperationResult(
                 success=False,
                 message=f"通知测试失败：{exc}",
@@ -125,30 +120,26 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
     def handle(self, event: dict[str, Any]) -> dict[str, Any]:
         event_type = str(event.get("event_type") or "unknown")
+        print(f"[钉钉Bot] 收到事件: {event_type}")
+
         title, content = self._build_message(event)
 
         cfg = self._resolve_config()
         configured = bool(str(cfg.get("webhook_url") or "").strip())
-        print(f"[钉钉Bot] 收到事件: {event_type}, 配置状态: {'已配置' if configured else '未配置'}, runtime_config_keys: {list(cfg.keys())}")
+        print(f"[钉钉Bot] 配置状态: {'已配置' if configured else '未配置'}, keys={list(cfg.keys())}")
 
         if configured:
-            category = self._category_for(event_type)
             try:
-                with self._lock:
-                    self._pending.append({
-                        "category": category,
-                        "title": title,
-                        "content": content,
-                        "time": time.strftime("%H:%M:%S"),
-                    })
-                    if self._flush_timer is not None:
-                        self._flush_timer.cancel()
-                    self._flush_timer = threading.Timer(MERGE_WINDOW_SECONDS, self._flush_pending)
-                    self._flush_timer.daemon = True
-                    self._flush_timer.start()
-                print(f"[钉钉Bot] 事件已加入待发送队列，当前队列长度: {len(self._pending)}")
+                category = self._category_for(event_type)
+                emoji = CATEGORY_EMOJI.get(category, "🔔")
+                full_title = f"{emoji} {title}"
+                print(f"[钉钉Bot] 准备发送: {full_title}")
+                self._send_to_dingtalk(full_title, content)
+                print(f"[钉钉Bot] 发送成功")
             except Exception as exc:
-                print(f"[钉钉Bot] 加入队列失败: {exc}")
+                import traceback
+                print(f"[钉钉Bot] 发送失败: {exc}")
+                traceback.print_exc()
 
         return OperationResult(
             success=True,
@@ -160,53 +151,6 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 "configured": configured,
             },
         ).model_dump(mode="json")
-
-    def _flush_pending(self) -> None:
-        with self._lock:
-            if not self._pending:
-                return
-            items = list(self._pending)
-            self._pending = []
-            self._flush_timer = None
-
-        print(f"[钉钉Bot] 开始批量发送，共 {len(items)} 条消息")
-        try:
-            title, body = self._format_merged(items)
-            self._send_to_dingtalk(title, body)
-            print(f"[钉钉Bot] 发送成功: {title}")
-        except Exception as exc:
-            print(f"[钉钉Bot] 发送失败: {exc}")
-            import traceback
-            traceback.print_exc()
-
-    def _format_merged(self, items: list[dict[str, Any]]) -> tuple[str, str]:
-        if len(items) == 1:
-            item = items[0]
-            emoji = CATEGORY_EMOJI.get(item["category"], "🔔")
-            return f"{emoji} {item['title']}", item["content"]
-
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for item in items:
-            grouped.setdefault(item["category"], []).append(item)
-
-        summary_parts = []
-        for category in ["任务完成", "任务失败", "任务取消", "任务开始", "任务创建", "转存任务", "网盘下载", "视频下载", "STRM生成", "系统通知"]:
-            if category in grouped:
-                count = len(grouped[category])
-                emoji = CATEGORY_EMOJI.get(category, "🔔")
-                summary_parts.append(f"{emoji}{category}×{count}")
-
-        title = f"📢 T3 通知 ({len(items)}条) " + " ".join(summary_parts)
-
-        lines: list[str] = []
-        for category, cat_items in grouped.items():
-            emoji = CATEGORY_EMOJI.get(category, "🔔")
-            lines.append(f"【{emoji} {category}】")
-            for idx, item in enumerate(cat_items, 1):
-                lines.append(f"  {idx}. [{item['time']}] {item['content']}")
-            lines.append("")
-
-        return title, "\n".join(lines).rstrip()
 
     def _is_configured(self, config: dict[str, Any] | None = None) -> bool:
         cfg = self._resolve_config(config)
@@ -239,15 +183,18 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         with httpx.Client(timeout=10) as client:
             resp = client.post(webhook_url, json=payload)
             resp.raise_for_status()
+            result = resp.json()
+            if result.get("errcode") != 0:
+                raise RuntimeError(f"钉钉返回错误: {result}")
 
     def _category_for(self, event_type: str) -> str:
         return EVENT_CATEGORY.get(event_type, "系统通知")
 
-    def _normalize_runtime_config(self, config: dict[str, Any] | None) -> dict[str, Any]:
+    @staticmethod
+    def _normalize_runtime_config(config: dict[str, Any] | None) -> dict[str, Any]:
         return dict(config or {})
 
     def _build_message(self, event: dict[str, Any]) -> tuple[str, str]:
-        # ── 顶层字段（DomainEvent / TaskEvent） ─────────────────────
         event_type = str(event.get("event_type") or "unknown")
         source = str(event.get("source") or "core")
         plugin_id = str(event.get("plugin_id") or "")
@@ -258,7 +205,6 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         output_payload = dict(payload.get("output_payload") or {})
         input_payload = dict(payload.get("input_payload") or {})
 
-        # ── 任务标识 ──────────────────────────────────────────────
         task_name = str(
             payload.get("task_name")
             or payload.get("title")
@@ -269,12 +215,10 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         task_id = str(event.get("task_id") or payload.get("task_id") or "")
         execution_id = str(event.get("execution_id") or payload.get("execution_id") or "")
 
-        # ── 模板 ──────────────────────────────────────────────────
         template_key = str(payload.get("template_key") or input_payload.get("template_key") or "")
         trigger_source = str(payload.get("trigger_source") or "")
         triggered_by = str(payload.get("triggered_by") or "")
 
-        # ── 平台 / 资源类型 ───────────────────────────────────────
         platform_name = str(payload.get("platform_name") or input_payload.get("platform_name") or "").strip()
         media_category = str(payload.get("media_category") or input_payload.get("media_category") or "").strip()
         sub_kind = str(payload.get("subscription_kind") or input_payload.get("subscription_kind") or "").strip()
@@ -282,7 +226,6 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         catalog_label = str(payload.get("catalog_source_label") or input_payload.get("catalog_source_label") or "").strip()
         owner_plugin_id = str(payload.get("owner_plugin_id") or "")
 
-        # ── 执行摘要 / 状态 ───────────────────────────────────────
         summary = str(payload.get("summary") or output_payload.get("summary") or "").strip()
         detail_message = str(payload.get("detail_message") or payload.get("message") or "").strip()
         error_text = str(
@@ -292,7 +235,6 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             or ""
         ).strip()
 
-        # ── 统计字段（output_payload / payload） ────────────────────
         def _count(key: str) -> int | None:
             v = output_payload.get(key)
             if v is None:
@@ -313,7 +255,6 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         last_new_data_count = _count("last_new_data_count")
         no_update_days = _count("no_update_days")
 
-        # ── 时间 / 耗时 ────────────────────────────────────────────
         duration_ms = _count("duration_ms")
         duration_text = ""
         if duration_ms is not None and duration_ms > 0:
@@ -325,14 +266,12 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             else:
                 duration_text = f"{sec:.1f}s"
 
-        # ── 目标目录 ───────────────────────────────────────────────
         target_dir = str(
             payload.get("target_dir")
             or input_payload.get("target_dir")
             or ""
         ).strip()
 
-        # ── 构建标签头部（任务类型 / 平台 / 资源种类） ────────────
         tags: list[str] = []
         if media_category:
             tags.append(media_category)
@@ -346,7 +285,6 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             tags.append(task_type)
         tag_prefix = f"({'·'.join(tags)})" if tags else ""
 
-        # ── 统计行 ─────────────────────────────────────────────────
         stat_parts: list[str] = []
         if saved_count is not None:
             stat_parts.append(f"转存成功 {saved_count} 项")
@@ -371,7 +309,6 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
         stat_line = "｜".join(stat_parts) if stat_parts else ""
 
-        # ── 无更新精准判定 ─────────────────────────────────────────
         is_no_update = False
         if (
             (saved_count is not None and saved_count == 0)
@@ -382,7 +319,6 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         ):
             is_no_update = True
 
-        # ── 内容行 ─────────────────────────────────────────────────
         lines: list[str] = []
         if tag_prefix:
             lines.append(f"🏷️ {tag_prefix}")
@@ -403,37 +339,34 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         if task_id:
             lines.append(f"🆔 {task_id}")
 
-        # ── 按事件类型生成标题与正文 ────────────────────────────────
         category = self._category_for(event_type)
-        emoji = CATEGORY_EMOJI.get(category, "🔔")
 
         if event_type == "task.completed":
             if is_no_update:
-                title = f"{emoji} {task_name} · 无更新"
+                title = f"{task_name} · 无更新"
             else:
-                title = f"{emoji} {task_name} · 完成"
+                title = f"{task_name} · 完成"
             return title, "\n".join(lines) if lines else f"{task_name} 已完成。"
 
         if event_type == "task.failed":
-            title = f"{emoji} {task_name} · 失败"
+            title = f"{task_name} · 失败"
             if error_text:
                 lines.insert(0, f"❌ {error_text}")
             return title, "\n".join(lines) if lines else f"{task_name} 执行失败：{error_text or '未知错误'}"
 
         if event_type == "task.canceled":
-            title = f"{emoji} {task_name} · 已取消"
+            title = f"{task_name} · 已取消"
             return title, "\n".join(lines) if lines else f"{task_name} 已取消。"
 
         if event_type == "task.started":
-            title = f"{emoji} {task_name} · 开始"
+            title = f"{task_name} · 开始"
             return title, "\n".join(lines) if lines else f"{task_name} 已开始执行。"
 
         if event_type == "task.created":
-            title = f"{emoji} {task_name} · 已创建"
+            title = f"{task_name} · 已创建"
             return title, "\n".join(lines) if lines else f"已创建新任务：{task_name}"
 
-        # 其它事件类型（转存 / 下载 / STRM 等）
-        title = f"{emoji} {task_name}"
+        title = f"{task_name}"
         if summary and not lines:
             lines.append(summary)
         return title, "\n".join(lines) if lines else f"{task_name}：{event_type}"
