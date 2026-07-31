@@ -355,7 +355,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.0.1"
+    plugin_version = "2.0.2"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
