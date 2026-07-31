@@ -16,6 +16,10 @@ from core.sdk import AutomationProvider, BasePlugin, OperationResult
 
 DEFAULT_EVENTS = ["task.completed", "task.failed"]
 
+# 默认 T3 平台 API 配置（当用户未在插件设置中填写时使用）
+DEFAULT_T3_API_BASE = "https://t3.midsummer.asia:28888/api"
+DEFAULT_T3_API_HEADER = "X-API-Key"
+
 EVENT_CATEGORY = {
     "task.completed": "任务完成",
     "task.failed": "任务失败",
@@ -355,7 +359,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.0.7"
+    plugin_version = "2.0.8"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -374,7 +378,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         config = self._resolve_config()
         api_base = str(config.get("t3_api_base") or "").strip()
         api_key = str(config.get("t3_api_key") or "").strip()
-        api_header = str(config.get("t3_api_header") or "X-API-Key").strip()
+        api_header = str(config.get("t3_api_header") or "").strip()
         # 兼容环境变量（T3MT_* 优先，然后 T3_*）
         if not api_base:
             api_base = (
@@ -384,24 +388,24 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 or ""
             )
             # T3MT_HOST 不带 /api 后缀，需要补全
-            if api_base and "T3MT_HOST" in str(api_base):
-                pass  # not needed, checking value below
             if api_base and "/api" not in api_base:
                 api_base = api_base.rstrip("/") + "/api"
+        # 最后兜底：使用内置默认 T3MT 平台地址
+        if not api_base:
+            api_base = DEFAULT_T3_API_BASE
         if not api_key:
             api_key = (
                 os.environ.get("T3MT_API_KEY")
                 or os.environ.get("T3_API_KEY")
                 or ""
             )
-        if api_header == "X-API-Key":
+        if not api_header:
             env_header = (
                 os.environ.get("T3MT_API_HEADER")
                 or os.environ.get("T3_API_HEADER")
                 or ""
             )
-            if env_header:
-                api_header = env_header
+            api_header = env_header if env_header else DEFAULT_T3_API_HEADER
         return api_base if api_base else None, api_key if api_key else None, api_header
 
     def _get_api_base(self) -> str | None:
