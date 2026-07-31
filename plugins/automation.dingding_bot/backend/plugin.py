@@ -360,7 +360,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.1.1"
+    plugin_version = "2.1.2"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -1615,66 +1615,87 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         # ==================== 按事件类型构建消息 ====================
         lines: list[str] = []
 
+        # ── 基础信息区 ──
+        info_parts: list[str] = []
+
         # 标签
         if tag_prefix:
-            lines.append(f"🏷️ {tag_prefix}")
+            info_parts.append(f"🏷️ {tag_prefix}")
 
         # 耗时
         if duration_text:
-            lines.append(f"⏱️ 任务耗时：{duration_text}")
+            info_parts.append(f"⏱️ 任务耗时：{duration_text}")
 
         # 统计
         if stat_line:
-            lines.append(f"📊 {stat_line}")
+            info_parts.append(f"📊 {stat_line}")
 
-        # 转存/保存明细
+        if info_parts:
+            lines.extend(info_parts)
+
+        # ── 文件明细区 ──
+        detail_parts: list[str] = []
+
         if saved_files:
             saved_display = _format_file_list(saved_files)
-            lines.append(f"📋 成功明细：{saved_display}")
+            detail_parts.append(f"📋 成功明细：{saved_display}")
 
         if skipped_files:
             skipped_display = _format_file_list(skipped_files)
-            lines.append(f"⏭️  跳过敏细：{skipped_display}")
+            detail_parts.append(f"⏭️  跳过敏细：{skipped_display}")
 
         if failed_files:
             failed_display = _format_file_list(failed_files)
-            lines.append(f"⚠️  失败明细：{failed_display}")
+            detail_parts.append(f"⚠️  失败明细：{failed_display}")
 
-        # 最新剧集
+        if detail_parts:
+            lines.extend(detail_parts)
+
+        # ── 剧集信息区 ──
+        episode_parts: list[str] = []
+
         if latest_episode_file:
-            lines.append(f"🆕 最新剧集：{latest_episode_file}")
+            episode_parts.append(f"🆕 最新剧集：{latest_episode_file}")
         elif latest_episode_number is not None:
-            lines.append(f"🆕 最新剧集：第 {latest_episode_number} 集")
+            episode_parts.append(f"🆕 最新剧集：第 {latest_episode_number} 集")
 
         if latest_episode_update_time:
-            lines.append(f"🕐 最新剧集更新时间：{latest_episode_update_time}")
+            episode_parts.append(f"🕐 最新剧集更新时间：{latest_episode_update_time}")
 
-        # 目标路径
+        if episode_parts:
+            lines.extend(episode_parts)
+
+        # ── 路径与触发区 ──
+        meta_parts: list[str] = []
+
         if target_dir:
-            lines.append(f"📁 转存目标：{target_dir}")
+            meta_parts.append(f"📁 转存目标：{target_dir}")
 
-        # 触发来源
         if trigger_source:
-            lines.append(f"⚡ 触发：{trigger_source}" + (f"（{triggered_by}）" if triggered_by else ""))
+            meta_parts.append(f"⚡ 触发：{trigger_source}" + (f"（{triggered_by}）" if triggered_by else ""))
 
-        # 总结/描述
+        if meta_parts:
+            lines.extend(meta_parts)
+
+        # ── 结果与状态区 ──
+        result_parts: list[str] = []
+
         if summary and summary != detail_message:
-            lines.append(f"📝 {summary}")
+            result_parts.append(f"📝 {summary}")
 
         if detail_message:
-            lines.append(f"💬 {detail_message}")
+            result_parts.append(f"💬 {detail_message}")
 
         # 无更新提示
         if is_no_update:
-            lines.append("🔄 本次无更新（已存在相同文件）")
+            result_parts.append("🔄 本次无更新（已存在相同文件）")
 
         # 错误信息
         if error_text and event_type != "task.failed":
-            lines.append(f"❌ {error_text}")
+            result_parts.append(f"❌ {error_text}")
 
-        # 任务ID（放在正常内容的最后）
-        if task_id:
-            lines.append(f"🆔 {task_id}")
+        if result_parts:
+            lines.extend(result_parts)
 
         # ==================== 平台接口获取状态区 ====================
         lines.append("")
