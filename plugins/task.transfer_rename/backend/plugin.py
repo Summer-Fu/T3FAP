@@ -142,6 +142,14 @@ class TransferRenameTaskPlugin(BasePlugin, TaskTypeProvider):
                     "default": 0,
                     "description": "集数序号偏移量（如：原第1集偏移+5后变为第6集）",
                 },
+                {
+                    "key": "extension_replacements",
+                    "label": "扩展名替换",
+                    "type": "string",
+                    "required": False,
+                    "default": "",
+                    "description": "扩展名替换规则，用逗号分隔，如：.zip→.mkv,.rar→.mp4（匹配原扩展名替换为新扩展名）",
+                },
             ],
             default_config={
                 "target_path": "/订阅",
@@ -155,31 +163,19 @@ class TransferRenameTaskPlugin(BasePlugin, TaskTypeProvider):
         )
 
     def validate_config(self, config: dict[str, Any]) -> OperationResult:
+        """校验插件全局配置（config_schema 中的项）。
+
+        注意：任务级配置（如 share_url、target_path）在任务创建时校验，
+        不在此全局配置校验中处理。
+        """
         errors: list[str] = []
 
-        share_url = str(config.get("share_url") or "").strip()
-        if not share_url:
-            errors.append("必须提供网盘分享链接")
-
-        target_path = str(config.get("target_path") or "").strip()
-        if not target_path:
-            errors.append("必须提供转存目标路径")
-
-        naming_template = str(config.get("naming_template") or "").strip()
-        if not naming_template:
-            errors.append("必须提供命名模板")
-
         try:
-            padding = int(config.get("episode_padding") or 0)
+            padding = int(config.get("default_padding") or 2)
             if padding < 0 or padding > 10:
-                errors.append("序号补零位数必须在0-10之间")
+                errors.append("默认序号补零位数必须在0-10之间")
         except (ValueError, TypeError):
-            errors.append("序号补零位数必须是有效数字")
-
-        try:
-            offset = int(config.get("episode_offset") or 0)
-        except (ValueError, TypeError):
-            errors.append("集数偏移量必须是有效数字")
+            errors.append("默认序号补零位数必须是有效数字")
 
         if errors:
             return OperationResult(
@@ -421,9 +417,16 @@ class TransferRenameTaskPlugin(BasePlugin, TaskTypeProvider):
         offset = int(config.get("episode_offset") or 0)
         replace_chars = str(config.get("replace_chars") or "").strip()
         clean_spaces = bool(config.get("clean_spaces", True))
+        extension_replacements_raw = str(config.get("extension_replacements") or "").strip()
 
         # 分离文件名和扩展名
         name_part, ext = os.path.splitext(original_name)
+
+        # 0. 扩展名替换（如 .zip → .mkv）
+        if extension_replacements_raw:
+            ext_replace_map = self._parse_extension_replacements(extension_replacements_raw)
+            if ext.lower() in ext_replace_map:
+                ext = ext_replace_map[ext.lower()]
 
         # 提取集数序号
         episode = self._extract_episode_number(name_part)
@@ -571,6 +574,46 @@ class TransferRenameTaskPlugin(BasePlugin, TaskTypeProvider):
                 latest = name
 
         return latest
+
+    @staticmethod
+    def _parse_extension_replacements(raw: str) -> dict[str, str]:
+        """解析扩展名替换规则字符串。
+
+        支持格式：
+        - 使用 → 分隔：.zip→.mkv,.rar→.mp4
+        - 使用 -> 分隔：.zip->.mkv,.rar->.mp4
+        - 使用 : 分隔：.zip:.mkv,.rar:.mp4
+
+        返回：{原扩展名(小写): 新扩展名} 映射
+        """
+        result: dict[str, str] = {}
+        if not raw:
+            return result
+
+        for rule in raw.split(","):
+            rule = rule.strip()
+            if not rule:
+                continue
+
+            # 尝试多种分隔符
+            parts = None
+            for sep in ("→", "->", ":", "="):
+                if sep in rule:
+                    parts = rule.split(sep, 1)
+                    break
+
+            if parts and len(parts) == 2:
+                old_ext = parts[0].strip().lower()
+                new_ext = parts[1].strip()
+                if old_ext and new_ext:
+                    # 确保扩展名以 . 开头
+                    if not old_ext.startswith("."):
+                        old_ext = "." + old_ext
+                    if not new_ext.startswith("."):
+                        new_ext = "." + new_ext
+                    result[old_ext] = new_ext
+
+        return result
 
     @staticmethod
     def _format_time() -> str:

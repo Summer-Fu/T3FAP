@@ -126,30 +126,24 @@ class DriveFilterDownloadTaskPlugin(BasePlugin, TaskTypeProvider):
         )
 
     def validate_config(self, config: dict[str, Any]) -> OperationResult:
+        """校验插件全局配置（config_schema 中的项）。
+
+        注意：任务级配置（如 share_url、range_mode）在任务创建时校验，
+        不在此全局配置校验中处理。
+        """
         errors: list[str] = []
 
-        range_mode = str(config.get("range_mode") or "all").strip()
-        if range_mode not in ("all", "range", "latest_n"):
-            errors.append(f"无效的筛选模式: {range_mode}")
+        default_range_mode = str(config.get("default_range_mode") or "latest_n").strip()
+        if default_range_mode not in ("all", "range", "latest_n"):
+            errors.append(f"无效的默认筛选模式: {default_range_mode}")
 
-        if range_mode == "range":
-            episode_range = str(config.get("episode_range") or "").strip()
-            if not episode_range:
-                errors.append("集数范围模式下必须填写集数范围")
-            elif not self._validate_episode_range(episode_range):
-                errors.append(f"无效的集数范围格式: {episode_range}")
-
-        if range_mode == "latest_n":
+        if default_range_mode == "latest_n":
             try:
-                latest_count = int(config.get("latest_count") or 0)
-                if latest_count <= 0:
-                    errors.append("最新集数必须大于0")
+                default_latest_count = int(config.get("default_latest_count") or 5)
+                if default_latest_count <= 0:
+                    errors.append("默认最新集数必须大于0")
             except (ValueError, TypeError):
-                errors.append("最新集数必须是有效数字")
-
-        share_url = str(config.get("share_url") or "").strip()
-        if not share_url:
-            errors.append("必须提供网盘分享链接")
+                errors.append("默认最新集数必须是有效数字")
 
         if errors:
             return OperationResult(
