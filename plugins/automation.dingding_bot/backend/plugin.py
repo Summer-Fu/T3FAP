@@ -355,7 +355,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.0.2"
+    plugin_version = "2.0.3"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -953,6 +953,57 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             if isinstance(raw_failed, list):
                 failed_files = _extract_filenames_from_items(raw_failed)
 
+        # === 策略3：从任务日志中解析文件明细 ===
+        # 例如: "skipped existing target files: 06.mkv, 01.mkv, 03.mkv"
+        task_logs: list[str] = []
+        raw_logs = output_payload.get("logs") or payload.get("logs") or output_payload.get("log_entries") or payload.get("log_entries") or []
+        if isinstance(raw_logs, list):
+            for entry in raw_logs:
+                if isinstance(entry, str):
+                    task_logs.append(entry)
+                elif isinstance(entry, dict):
+                    msg = entry.get("message") or entry.get("msg") or ""
+                    if msg:
+                        task_logs.append(str(msg))
+
+        # 从日志中提取 skipped 文件
+        skipped_from_logs: list[str] = []
+        saved_from_logs: list[str] = []
+        for log_line in task_logs:
+            # 匹配: skipped existing target files: xxx, yyy, zzz
+            m = re.search(r"skipped\s+(?:existing\s+)?(?:target\s+)?files?:\s*(.+)", log_line, re.IGNORECASE)
+            if m:
+                files_str = m.group(1).strip()
+                # 分割文件名（逗号或顿号分隔）
+                parts = re.split(r"[、,，]", files_str)
+                for p in parts:
+                    fn = p.strip().rstrip(".")
+                    if fn:
+                        skipped_from_logs.append(fn)
+            # 匹配: 筛选结果：保留 N 个文件，跳过 M 个
+            m2 = re.search(r"筛选结果[：:]\s*保留\s*(\d+)\s*个文件[，,]\s*跳过\s*(\d+)\s*个", log_line)
+            if m2:
+                print(f"[钉钉Bot][日志解析] 筛选结果: 保留={m2.group(1)}, 跳过={m2.group(2)}")
+            # 匹配: 转存数量：N 或 已转存 N 项
+            m3 = re.search(r"(?:转存数量|已转存)[：:]\s*(\d+)", log_line)
+            if m3:
+                print(f"[钉钉Bot][日志解析] 转存数量: {m3.group(1)}")
+
+        # 合并日志解析出的文件（去重）
+        if skipped_from_logs:
+            for fn in skipped_from_logs:
+                if fn not in skipped_files:
+                    skipped_files.append(fn)
+            print(f"[钉钉Bot][日志解析] 从日志提取跳过文件: {len(skipped_from_logs)} 个")
+
+        if saved_from_logs:
+            for fn in saved_from_logs:
+                if fn not in saved_files:
+                    saved_files.append(fn)
+            print(f"[钉钉Bot][日志解析] 从日志提取成功文件: {len(saved_from_logs)} 个")
+
+        print(f"[钉钉Bot][最终统计] saved_files={len(saved_files)}, skipped_files={len(skipped_files)}, failed_files={len(failed_files)}")
+
         # 合并所有可见文件用于分析最新剧集
         all_visible_files = saved_files + skipped_files + failed_files
 
@@ -1129,6 +1180,45 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         # 任务ID
         if task_id:
             lines.append(f"🆔 {task_id}")
+
+        # ==================== 调试数据区（全量字段） ====================
+        # 把 event 中所有能拿到的数据都列出来，方便排查
+        lines.append("")
+        lines.append("═" * 20 + " 调试数据 " + "═" * 20)
+
+        def _safe_json(obj: Any, max_len: int = 3000) -> str:
+            """安全地 JSON 序列化，截断过长内容。"""
+            try:
+                text = json.dumps(obj, ensure_ascii=False, default=str)
+                if len(text) > max_len:
+                    return text[:max_len] + f"…（已截断，共{len(text)}字）"
+                return text
+            except Exception as e:
+                return f"<序列化失败: {e}>"
+
+        # 列出所有顶层 keys
+        lines.append(f"🔝 event 顶层字段: {list(event.keys())}")
+        lines.append(f"📦 payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'N/A'}")
+        lines.append(f"📤 output_payload keys: {list(output_payload.keys()) if isinstance(output_payload, dict) else 'N/A'}")
+        lines.append(f"📥 input_payload keys: {list(input_payload.keys()) if isinstance(input_payload, dict) else 'N/A'}")
+
+        # output_payload 全量内容（最可能包含文件列表）
+        if output_payload:
+            lines.append("")
+            lines.append("📤 output_payload 全量:")
+            lines.append(_safe_json(output_payload, 4000))
+
+        # payload 全量
+        if payload and payload != output_payload:
+            lines.append("")
+            lines.append("📦 payload 全量:")
+            lines.append(_safe_json(payload, 2000))
+
+        # event 全量（去掉已展示的 payload 避免重复）
+        event_for_debug = {k: v for k, v in event.items() if k != "payload"}
+        lines.append("")
+        lines.append("🔝 event（不含payload）全量:")
+        lines.append(_safe_json(event_for_debug, 3000))
 
         # ==================== 标题构建 ====================
         category = self._category_for(event_type)
