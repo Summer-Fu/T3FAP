@@ -17,7 +17,7 @@ from core.sdk import AutomationProvider, BasePlugin, OperationResult
 DEFAULT_EVENTS = ["task.completed", "task.failed"]
 
 # 默认 T3 平台 API 配置（当用户未在插件设置中填写时使用）
-DEFAULT_T3_API_BASE = "https://t3.midsummer.asia:28888/api"
+DEFAULT_T3_API_BASE = "http://192.168.1.219:8521/api"
 DEFAULT_T3_API_HEADER = "X-API-Key"
 
 EVENT_CATEGORY = {
@@ -359,7 +359,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.0.8"
+    plugin_version = "2.0.9"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -409,41 +409,80 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         return api_base if api_base else None, api_key if api_key else None, api_header
 
     def _get_api_base(self) -> str | None:
-        """获取平台 API 地址。"""
+        """获取平台 API 地址。
+
+        优先级：
+        1. 已缓存的地址
+        2. 用户配置/环境变量中的地址（但会先验证是否可达）
+        3. 自动探测容器内本地端口（T3 平台运行在 Docker 内，应优先用本地地址）
+        4. 兜底默认地址（T3MT 远程平台）
+        """
         if self._api_base:
             return self._api_base
-        # 优先从配置/环境变量获取
+
+        # 收集所有候选地址，按优先级排序
+        candidates: list[str] = []
+        import os
+
+        # 第1组：用户明确配置的地址（最高优先级，但要先测试可达性）
         configured_base, _, _ = self._get_api_credentials()
         if configured_base:
-            # 去掉末尾的 /api，如果配置里带了的话，统一在 fetch 时处理
-            base = configured_base.rstrip("/")
-            self._api_base = base
-            print(f"[钉钉Bot][平台API] 使用配置的 API 地址: {base}")
-            return base
-        # 尝试常见端口自动探测
-        import os
-        env_port = os.environ.get("T3_API_PORT") or os.environ.get("PORT")
-        candidates = []
+            # normalized: 去掉末尾 /api，在 fetch 时统一处理
+            normalized = configured_base.rstrip("/")
+            candidates.append(normalized)
+
+        # 第2组：容器内本地探测（T3 平台就在同一个容器里运行）
+        # 尝试常见的 T3 平台端口和 host
+        local_hosts = ["127.0.0.1", "localhost", "0.0.0.0"]
+        # 从环境变量找端口
+        env_port = (
+            os.environ.get("T3_API_PORT")
+            or os.environ.get("PORT")
+            or os.environ.get("T3_PORT")
+            or ""
+        )
+        # 常见端口：7860(常见)、8000(FastAPI)、3000(前端)、5173(Vite)、80(HTTP)、7861、8080
+        common_ports = ["7860", "8000", "3000", "5173", "80", "7861", "8080"]
+        ports_to_try: list[str] = []
         if env_port:
-            candidates.append(f"http://127.0.0.1:{env_port}")
-        candidates.extend([
-            "http://127.0.0.1:7860",
-            "http://127.0.0.1:8000",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:5173",
-            "http://0.0.0.0:7860",
-        ])
+            ports_to_try.append(str(env_port))
+        ports_to_try.extend(common_ports)
+
+        for host in local_hosts:
+            for port in ports_to_try:
+                candidate = f"http://{host}:{port}"
+                if candidate not in candidates:
+                    candidates.append(candidate)
+
+        # 第3组：兜底的远程 T3MT 平台（最后才试，因为容器里可能访问不到外网）
+        remote_default = DEFAULT_T3_API_BASE.rstrip("/")
+        if remote_default not in candidates:
+            # remote_default 已经带 /api，需要和其他 candidate 格式一致
+            if remote_default.endswith("/api"):
+                remote_base_no_api = remote_default[:-4].rstrip("/")
+                if remote_base_no_api not in candidates:
+                    candidates.append(remote_base_no_api)
+            else:
+                candidates.append(remote_default)
+
+        # 逐个测试，返回第一个可达的
+        print(f"[钉钉Bot][平台API] 开始探测 {len(candidates)} 个候选地址...")
         for base in candidates:
+            # 构造测试 URL
+            test_url = base if "/api" in base else f"{base}/api"
             try:
-                with httpx.Client(timeout=1) as client:
-                    resp = client.get(f"{base}/api/tasks")
+                with httpx.Client(timeout=1.5) as client:
+                    resp = client.get(f"{test_url}/tasks?limit=1")
+                    # 只要有响应（即使是401/403）都说明地址是通的
                     if resp.status_code < 500:
                         self._api_base = base
-                        print(f"[钉钉Bot][平台API] 探测成功: {base}")
+                        print(f"[钉钉Bot][平台API] 探测成功: {base} (HTTP {resp.status_code})")
                         return base
-            except Exception:
+            except Exception as e:
+                # 这个地址不通，继续下一个
                 continue
-        print(f"[钉钉Bot][平台API] 未探测到本地API服务")
+
+        print(f"[钉钉Bot][平台API] 所有 {len(candidates)} 个候选地址均不可达")
         return None
 
     def _fetch_api(self, path: str) -> tuple[bool, Any]:
