@@ -7,9 +7,9 @@ import json
 import threading
 import time
 import urllib.parse
-import urllib.request
-import urllib.error
 from typing import Any
+
+import httpx
 
 from core.sdk import AutomationProvider, BasePlugin, OperationResult
 
@@ -50,10 +50,10 @@ RESOURCE_KIND_LABEL = {
 MERGE_WINDOW_SECONDS = 5
 
 
-class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
+class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -153,8 +153,7 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         except Exception:
             pass
 
-    @staticmethod
-    def _format_merged(items: list[dict[str, Any]]) -> tuple[str, str]:
+    def _format_merged(self, items: list[dict[str, Any]]) -> tuple[str, str]:
         if len(items) == 1:
             item = items[0]
             emoji = CATEGORY_EMOJI.get(item["category"], "🔔")
@@ -209,34 +208,30 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
             "at": {"atMobiles": at_mobiles, "isAtAll": False},
         }
 
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            webhook_url,
-            data=data,
-            method="POST",
-            headers={"Content-Type": "application/json; charset=utf-8"},
-        )
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(webhook_url, json=payload)
+            resp.raise_for_status()
 
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
-
-    @staticmethod
-    def _category_for(event_type: str) -> str:
+    def _category_for(self, event_type: str) -> str:
         return EVENT_CATEGORY.get(event_type, "系统通知")
 
-    @staticmethod
-    def _normalize_runtime_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    def _normalize_runtime_config(self, config: dict[str, Any] | None) -> dict[str, Any]:
         return dict(config or {})
 
-    @classmethod
-    def _build_message(cls, event: dict[str, Any]) -> tuple[str, str]:
+    def _build_message(self, event: dict[str, Any]) -> tuple[str, str]:
+        # ── 顶层字段（DomainEvent / TaskEvent） ─────────────────────
         event_type = str(event.get("event_type") or "unknown")
+        source = str(event.get("source") or "core")
+        plugin_id = str(event.get("plugin_id") or "")
+        task_type = str(event.get("task_type") or "")
+        status = str(event.get("status") or "unknown")
+
         payload = dict(event.get("payload") or {})
         output_payload = dict(payload.get("output_payload") or {})
         input_payload = dict(payload.get("input_payload") or {})
 
         # ── 任务标识 ──────────────────────────────────────────────
-        task_name = (
+        task_name = str(
             payload.get("task_name")
             or payload.get("title")
             or input_payload.get("task_name")
@@ -246,12 +241,18 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         task_id = str(event.get("task_id") or payload.get("task_id") or "")
         execution_id = str(event.get("execution_id") or payload.get("execution_id") or "")
 
+        # ── 模板 ──────────────────────────────────────────────────
+        template_key = str(payload.get("template_key") or input_payload.get("template_key") or "")
+        trigger_source = str(payload.get("trigger_source") or "")
+        triggered_by = str(payload.get("triggered_by") or "")
+
         # ── 平台 / 资源类型 ───────────────────────────────────────
         platform_name = str(payload.get("platform_name") or input_payload.get("platform_name") or "").strip()
         media_category = str(payload.get("media_category") or input_payload.get("media_category") or "").strip()
         sub_kind = str(payload.get("subscription_kind") or input_payload.get("subscription_kind") or "").strip()
         sub_kind_label = RESOURCE_KIND_LABEL.get(sub_kind, sub_kind)
         catalog_label = str(payload.get("catalog_source_label") or input_payload.get("catalog_source_label") or "").strip()
+        owner_plugin_id = str(payload.get("owner_plugin_id") or "")
 
         # ── 执行摘要 / 状态 ───────────────────────────────────────
         summary = str(payload.get("summary") or output_payload.get("summary") or "").strip()
@@ -262,9 +263,8 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
             or payload.get("error")
             or ""
         ).strip()
-        status = str(event.get("status") or payload.get("status") or "").strip()
 
-        # ── 统计字段（output_payload） ─────────────────────────────
+        # ── 统计字段（output_payload / payload） ────────────────────
         def _count(key: str) -> int | None:
             v = output_payload.get(key)
             if v is None:
@@ -314,6 +314,8 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
             tags.append(sub_kind_label)
         if catalog_label:
             tags.append(catalog_label)
+        if task_type and task_type not in tags:
+            tags.append(task_type)
         tag_prefix = f"({'·'.join(tags)})" if tags else ""
 
         # ── 统计行 ─────────────────────────────────────────────────
@@ -362,6 +364,8 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
             lines.append(f"📊 {stat_line}")
         if target_dir:
             lines.append(f"📁 目标：{target_dir}")
+        if trigger_source:
+            lines.append(f"⚡ 触发：{trigger_source}" + (f"（{triggered_by}）" if triggered_by else ""))
         if summary and summary != detail_message:
             lines.append(f"📝 {summary}")
         if detail_message:
@@ -370,11 +374,9 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
             lines.append("🔄 本次无更新（已存在相同文件）")
         if task_id:
             lines.append(f"🆔 {task_id}")
-        if execution_id:
-            lines.append(f"🔗 {execution_id[:16]}…")
 
         # ── 按事件类型生成标题与正文 ────────────────────────────────
-        category = cls._category_for(event_type)
+        category = self._category_for(event_type)
         emoji = CATEGORY_EMOJI.get(category, "🔔")
 
         if event_type == "task.completed":
