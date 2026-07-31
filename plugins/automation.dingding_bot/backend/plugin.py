@@ -355,7 +355,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.0.4"
+    plugin_version = "2.0.5"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -363,6 +363,78 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         self._event_buffer: dict[str, dict[str, Any]] = {}
         # 已发送的 task_id 集合，防止重复
         self._sent_tasks: set[str] = set()
+        # 平台本地 API 基础地址（尝试自动探测）
+        self._api_base: str | None = None
+
+    # ==================== 平台本地 API 调用 ====================
+
+    def _get_api_base(self) -> str | None:
+        """获取平台本地 API 地址。"""
+        if self._api_base:
+            return self._api_base
+        # 尝试常见端口
+        import os
+        env_port = os.environ.get("T3_API_PORT") or os.environ.get("PORT")
+        candidates = []
+        if env_port:
+            candidates.append(f"http://127.0.0.1:{env_port}")
+        candidates.extend([
+            "http://127.0.0.1:7860",
+            "http://127.0.0.1:8000",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
+            "http://0.0.0.0:7860",
+        ])
+        for base in candidates:
+            try:
+                with httpx.Client(timeout=1) as client:
+                    resp = client.get(f"{base}/api/tasks")
+                    if resp.status_code < 500:
+                        self._api_base = base
+                        print(f"[钉钉Bot][平台API] 探测成功: {base}")
+                        return base
+            except Exception:
+                continue
+        print(f"[钉钉Bot][平台API] 未探测到本地API服务")
+        return None
+
+    def _fetch_api(self, path: str) -> tuple[bool, Any]:
+        """调用平台本地 API，返回 (是否成功, 数据)。"""
+        base = self._get_api_base()
+        if not base:
+            return False, "未探测到平台API地址"
+        url = f"{base}{path}" if path.startswith("/") else f"{base}/{path}"
+        try:
+            with httpx.Client(timeout=5) as client:
+                resp = client.get(url)
+                if resp.status_code == 200:
+                    return True, resp.json()
+                return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except Exception as e:
+            return False, str(e)
+
+    def _read_local_task_logs(self, execution_id: str) -> str:
+        """从本地文件系统读取任务执行日志。"""
+        import os
+        candidates = [
+            f"storage/runtime/task-logs/{execution_id}.log",
+            f"storage/runtime/task-logs/{execution_id}",
+            f"runtime/task-logs/{execution_id}.log",
+        ]
+        # 也尝试从环境变量获取项目根目录
+        project_root = os.environ.get("PROJECT_ROOT") or os.environ.get("T3_ROOT") or "."
+        for rel in candidates:
+            full_path = os.path.join(project_root, rel) if project_root != "." else rel
+            try:
+                if os.path.isfile(full_path):
+                    with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                    print(f"[钉钉Bot][本地日志] 读取成功: {full_path} ({len(content)}字)")
+                    return content
+            except Exception as e:
+                print(f"[钉钉Bot][本地日志] 读取失败 {full_path}: {e}")
+        print(f"[钉钉Bot][本地日志] 未找到 execution_id={execution_id} 的日志文件")
+        return ""
 
     # ==================== 配置管理 ====================
 
@@ -709,9 +781,94 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             "input": input_payload,
         }
 
-        # 任务名称（优先从各个层级查找）
+        task_id = str(event.get("task_id") or payload.get("task_id") or _deep_find_first(all_data, "task_id") or "")
+        execution_id = str(event.get("execution_id") or payload.get("execution_id") or "")
+
+        # -------- 调用平台本地 API 获取完整数据 --------
+        # 接口1: GET /api/tasks/{task_id} - 任务详情
+        task_detail: dict[str, Any] = {}
+        task_detail_status = "此任务不涉及"
+        if task_id:
+            ok, data = self._fetch_api(f"/api/tasks/{task_id}")
+            if ok:
+                task_detail = data if isinstance(data, dict) else {}
+                # 如果返回的是 {'item': ...} 格式
+                if "item" in task_detail and isinstance(task_detail["item"], dict):
+                    task_detail = task_detail["item"]
+                task_detail_status = "已获取"
+                # 把任务详情合并到 all_data 用于深度搜索
+                all_data["task_detail"] = task_detail
+                # 把详情中的 latest_execution 也合进来
+                if "latest_execution" in task_detail and isinstance(task_detail["latest_execution"], dict):
+                    all_data["latest_execution"] = task_detail["latest_execution"]
+                    # 从 latest_execution 中提取日志
+                    if not execution_id:
+                        execution_id = str(task_detail["latest_execution"].get("execution_id") or "")
+            else:
+                task_detail_status = f"获取失败: {data}"
+        print(f"[钉钉Bot][平台API] 任务详情: {task_detail_status}")
+
+        # 接口2: GET /api/tasks/executions/{execution_id} - 执行详情
+        execution_detail: dict[str, Any] = {}
+        execution_detail_status = "此任务不涉及"
+        if execution_id:
+            ok, data = self._fetch_api(f"/api/tasks/executions/{execution_id}")
+            if ok:
+                execution_detail = data if isinstance(data, dict) else {}
+                execution_detail_status = "已获取"
+                all_data["execution_detail"] = execution_detail
+                # 把执行详情的 output_payload 也合进来
+                if "output_payload" in execution_detail and isinstance(execution_detail["output_payload"], dict):
+                    all_data["execution_output_payload"] = execution_detail["output_payload"]
+            else:
+                execution_detail_status = f"获取失败: {data}"
+        print(f"[钉钉Bot][平台API] 执行详情: {execution_detail_status}")
+
+        # 接口3: GET /api/tasks - 任务列表（兜底用）
+        tasks_list_status = "此任务不涉及"
+
+        # 接口4: 从本地文件系统读取任务执行日志
+        local_logs = ""
+        local_logs_status = "此任务不涉及"
+        if execution_id:
+            local_logs = self._read_local_task_logs(execution_id)
+            if local_logs:
+                local_logs_status = f"已获取 ({len(local_logs)}字)"
+            else:
+                local_logs_status = "未找到日志文件"
+        print(f"[钉钉Bot][本地日志] {local_logs_status}")
+
+        # 把 execution_detail 里的 logs 也合入本地日志
+        if not local_logs and execution_detail:
+            exec_logs = execution_detail.get("logs") or execution_detail.get("log_entries") or []
+            if isinstance(exec_logs, list) and exec_logs:
+                local_logs = "\n".join(
+                    str(entry.get("message") or entry) if isinstance(entry, dict) else str(entry)
+                    for entry in exec_logs
+                )
+                local_logs_status = f"从执行详情获取 ({len(local_logs)}字)"
+
+        # 从 task_detail 中也尝试拿日志
+        if not local_logs and task_detail:
+            latest_exec = task_detail.get("latest_execution") or {}
+            if isinstance(latest_exec, dict):
+                exec_logs = latest_exec.get("logs") or latest_exec.get("log_entries") or []
+                if isinstance(exec_logs, list) and exec_logs:
+                    local_logs = "\n".join(
+                        str(entry.get("message") or entry) if isinstance(entry, dict) else str(entry)
+                        for entry in exec_logs
+                    )
+                    local_logs_status = f"从任务详情获取 ({len(local_logs)}字)"
+
+        # -------- 任务名称（优先从各个层级查找） --------
         # payload.task_title 是最完整的任务名（如 "九门 (2026) 4K... - 订阅转存"）
-        task_title_val = payload.get("task_title") or output_payload.get("task_title") or _deep_find_first(all_data, "task_title")
+        task_title_val = (
+            task_detail.get("task_title")
+            or task_detail.get("title")
+            or payload.get("task_title")
+            or output_payload.get("task_title")
+            or _deep_find_first(all_data, "task_title")
+        )
         task_name_candidates = []
         if isinstance(task_title_val, str) and task_title_val:
             task_name_candidates.append(task_title_val)
@@ -1241,9 +1398,30 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         if error_text and event_type != "task.failed":
             lines.append(f"❌ {error_text}")
 
-        # 任务ID
+        # 任务ID（放在正常内容的最后）
         if task_id:
             lines.append(f"🆔 {task_id}")
+
+        # ==================== 平台接口获取状态区 ====================
+        lines.append("")
+        lines.append("═" * 15 + " 平台接口获取状态 " + "═" * 15)
+        lines.append(f"📋 GET /api/tasks/{task_id}（任务详情）: {task_detail_status}")
+        lines.append(f"⚙️  GET /api/tasks/executions/{execution_id}（执行详情）: {execution_detail_status}")
+        lines.append(f"📜 GET /api/tasks（任务列表）: {tasks_list_status}")
+        lines.append(f"📝 本地日志文件读取: {local_logs_status}")
+
+        # ==================== 任务执行滚动日志 ====================
+        if local_logs:
+            lines.append("")
+            lines.append("═" * 18 + " 任务执行日志 " + "═" * 18)
+            # 最多展示 50 行，超出截断
+            log_lines = local_logs.strip().split("\n")
+            if len(log_lines) > 50:
+                shown = log_lines[-50:]
+                lines.extend(shown)
+                lines.append(f"…（已截断，共{len(log_lines)}行）")
+            else:
+                lines.extend(log_lines)
 
         # ==================== 调试数据区（全量字段） ====================
         # 把 event 中所有能拿到的数据都列出来，方便排查
@@ -1265,6 +1443,10 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         lines.append(f"📦 payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'N/A'}")
         lines.append(f"📤 output_payload keys: {list(output_payload.keys()) if isinstance(output_payload, dict) else 'N/A'}")
         lines.append(f"📥 input_payload keys: {list(input_payload.keys()) if isinstance(input_payload, dict) else 'N/A'}")
+        if task_detail:
+            lines.append(f"📋 任务详情 keys: {list(task_detail.keys()) if isinstance(task_detail, dict) else 'N/A'}")
+        if execution_detail:
+            lines.append(f"⚙️  执行详情 keys: {list(execution_detail.keys()) if isinstance(execution_detail, dict) else 'N/A'}")
 
         # output_payload 全量内容（最可能包含文件列表）
         if output_payload:
@@ -1278,42 +1460,57 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             lines.append("📦 payload 全量:")
             lines.append(_safe_json(payload, 2000))
 
+        # 任务详情
+        if task_detail:
+            lines.append("")
+            lines.append("📋 任务详情全量:")
+            lines.append(_safe_json(task_detail, 3000))
+
+        # 执行详情
+        if execution_detail:
+            lines.append("")
+            lines.append("⚙️  执行详情全量:")
+            lines.append(_safe_json(execution_detail, 3000))
+
         # event 全量（去掉已展示的 payload 避免重复）
         event_for_debug = {k: v for k, v in event.items() if k != "payload"}
         lines.append("")
         lines.append("🔝 event（不含payload）全量:")
         lines.append(_safe_json(event_for_debug, 3000))
 
-        # ==================== 标题构建 ====================
+        # ==================== 标题构建（task_id + 任务名） ====================
         category = self._category_for(event_type)
+
+        # 标题前缀: [task_id] 任务名 · 状态
+        task_id_prefix = f"[{task_id}] " if task_id else ""
 
         if event_type == "task.completed":
             if is_no_update:
-                title = f"{task_name} · 无更新"
+                title = f"{task_id_prefix}{task_name} · 无更新"
             else:
-                title = f"{task_name} · 完成"
+                title = f"{task_id_prefix}{task_name} · 完成"
             return title, "\n".join(lines) if lines else f"{task_name} 已完成。"
 
         if event_type == "task.failed":
-            title = f"{task_name} · 失败"
+            title = f"{task_id_prefix}{task_name} · 失败"
             if error_text:
                 # 错误信息放最前面
                 lines.insert(0, f"❌ {error_text}")
             return title, "\n".join(lines) if lines else f"{task_name} 执行失败：{error_text or '未知错误'}"
 
         if event_type == "task.canceled":
-            title = f"{task_name} · 已取消"
+            title = f"{task_id_prefix}{task_name} · 已取消"
             return title, "\n".join(lines) if lines else f"{task_name} 已取消。"
 
         if event_type == "task.started":
-            title = f"{task_name} · 开始"
+            title = f"{task_id_prefix}{task_name} · 开始"
             return title, "\n".join(lines) if lines else f"{task_name} 已开始执行。"
 
         if event_type == "task.created":
-            title = f"{task_name} · 已创建"
+            title = f"{task_id_prefix}{task_name} · 已创建"
             return title, "\n".join(lines) if lines else f"已创建新任务：{task_name}"
 
-        title = f"{task_name}"
+        title = f"{task_id_prefix}{task_name}"
         if summary and not lines:
             lines.append(summary)
         return title, "\n".join(lines) if lines else f"{task_name}：{event_type}"
