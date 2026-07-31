@@ -24,7 +24,7 @@ class DriveFilterDownloadTaskPlugin(BasePlugin, TaskTypeProvider):
 
     plugin_id = "task.drive_filter_download"
     plugin_name = "云盘过滤下载任务插件"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
 
     # 视频文件扩展名
     VIDEO_EXTENSIONS = {

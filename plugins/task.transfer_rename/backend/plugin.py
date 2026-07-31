@@ -27,7 +27,7 @@ class TransferRenameTaskPlugin(BasePlugin, TaskTypeProvider):
 
     plugin_id = "task.transfer_rename"
     plugin_name = "转存前文件重命名任务插件"
-    plugin_version = "0.1.0"
+    plugin_version = "0.2.0"
 
     def get_template(self) -> TaskTemplate:
         return TaskTemplate(

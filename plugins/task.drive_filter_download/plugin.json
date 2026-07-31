@@ -1,7 +1,7 @@
 {
   "id": "task.drive_filter_download",
   "name": "云盘过滤下载任务插件",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "category": "task",
   "description": "支持集数范围筛选、最新N集下载的云盘文件过滤下载任务插件，支持下载后消息通知",
   "core_version": ">=1.0.0 <2.0.0",
