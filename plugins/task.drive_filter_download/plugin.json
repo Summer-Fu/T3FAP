@@ -1,0 +1,68 @@
+{
+  "id": "task.drive_filter_download",
+  "name": "云盘过滤下载任务插件",
+  "version": "0.1.0",
+  "category": "task",
+  "description": "支持集数范围筛选、最新N集下载的云盘文件过滤下载任务插件，支持下载后消息通知",
+  "core_version": ">=1.0.0 <2.0.0",
+  "contract_version": "1.0",
+  "capabilities": [
+    "task.template",
+    "task.executor",
+    "task.from_resource"
+  ],
+  "backend": {
+    "entry": "backend.plugin:plugin"
+  },
+  "permissions": [
+    "task.dispatch",
+    "network"
+  ],
+  "dependencies": [],
+  "config_schema": [
+    {
+      "key": "default_download_path",
+      "label": "默认下载路径",
+      "type": "string",
+      "required": false,
+      "default": "/downloads",
+      "description": "下载文件的默认保存路径"
+    },
+    {
+      "key": "default_range_mode",
+      "label": "默认筛选模式",
+      "type": "select",
+      "required": false,
+      "default": "latest_n",
+      "description": "默认的文件筛选模式",
+      "options": [
+        {"value": "all", "label": "全部下载"},
+        {"value": "range", "label": "集数范围"},
+        {"value": "latest_n", "label": "最新N集"}
+      ]
+    },
+    {
+      "key": "default_latest_count",
+      "label": "默认最新集数",
+      "type": "number",
+      "required": false,
+      "default": 5,
+      "description": "最新N集模式下的默认集数"
+    },
+    {
+      "key": "notification_enabled",
+      "label": "启用下载通知",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "下载完成后是否发送通知消息"
+    }
+  ],
+  "ui": {
+    "menus": [],
+    "settings_sections": [],
+    "task_templates": [
+      "drive_filter_download"
+    ]
+  }
+}
