@@ -22,9 +22,9 @@ class DriveFilterDownloadTaskPlugin(BasePlugin, TaskTypeProvider):
     - 最新N集下载
     """
 
-    plugin_id = "task.drive_filter_download"
-    plugin_name = "云盘过滤下载任务插件"
-    plugin_version = "0.1.1"
+    plugin_id = "task.ext_drive_filter_download"
+    plugin_name = "云盘过滤下载（扩展）"
+    plugin_version = "0.2.0"
 
     # 视频文件扩展名
     VIDEO_EXTENSIONS = {
@@ -44,7 +44,7 @@ class DriveFilterDownloadTaskPlugin(BasePlugin, TaskTypeProvider):
             plugin_id=self.plugin_id,
             title="云盘过滤下载",
             allow_manual_creation=True,
-            supported_inputs=["manual", "resource", "share"],
+            supported_inputs=["manual", "resource"],
             form_schema=[
                 {
                     "key": "share_url",

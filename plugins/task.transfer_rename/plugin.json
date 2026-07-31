@@ -1,7 +1,7 @@
 {
-  "id": "task.transfer_rename",
-  "name": "转存前文件重命名任务插件",
-  "version": "0.2.0",
+  "id": "task.ext_transfer_rename",
+  "name": "转存前重命名（扩展）",
+  "version": "0.3.0",
   "category": "task",
   "description": "在网盘转存前对文件进行重命名处理，支持序号补零、添加前缀后缀、字符替换等标准化操作",
   "core_version": ">=1.0.0 <2.0.0",

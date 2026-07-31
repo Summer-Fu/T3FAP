@@ -25,9 +25,9 @@ class TransferRenameTaskPlugin(BasePlugin, TaskTypeProvider):
     - 从原文件名提取序号
     """
 
-    plugin_id = "task.transfer_rename"
-    plugin_name = "转存前文件重命名任务插件"
-    plugin_version = "0.2.0"
+    plugin_id = "task.ext_transfer_rename"
+    plugin_name = "转存前重命名（扩展）"
+    plugin_version = "0.3.0"
 
     def get_template(self) -> TaskTemplate:
         return TaskTemplate(
@@ -36,7 +36,7 @@ class TransferRenameTaskPlugin(BasePlugin, TaskTypeProvider):
             plugin_id=self.plugin_id,
             title="转存前文件重命名",
             allow_manual_creation=True,
-            supported_inputs=["manual", "resource", "share"],
+            supported_inputs=["manual", "resource"],
             form_schema=[
                 {
                     "key": "share_url",
