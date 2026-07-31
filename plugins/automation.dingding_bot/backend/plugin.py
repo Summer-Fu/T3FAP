@@ -820,22 +820,73 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         failed_files: list[str] = []
         all_file_items: list[Any] = []
 
-        # share_results
-        share_results = output_payload.get("share_results") or payload.get("share_results") or []
-        if isinstance(share_results, list):
-            all_file_items.extend(share_results)
+        # === 策略1：直接查找已知字段 ===
+        direct_keys = [
+            "share_results", "artifacts", "items", "results", "files",
+            "entries", "saved_items", "processed_items", "transferred_items",
+            "saved_files", "skipped_files", "failed_files", "transfer_results",
+        ]
+        for key in direct_keys:
+            for src in [output_payload, payload, input_payload]:
+                val = src.get(key)
+                if isinstance(val, list) and val:
+                    print(f"[钉钉Bot][数据侦探] 发现列表字段: {key} (长度={len(val)})")
+                    all_file_items.extend(val)
 
-        # artifacts
-        artifacts = output_payload.get("artifacts") or payload.get("artifacts") or []
-        if isinstance(artifacts, list):
-            all_file_items.extend(artifacts)
+        # === 策略2：全量扫描 output_payload/payload 中所有列表类型的字段 ===
+        def _scan_all_lists(obj: Any, path: str = "root", max_depth: int = 6) -> list[tuple[str, list[Any]]]:
+            """递归扫描对象中所有的列表字段，返回 (路径, 列表)。"""
+            results: list[tuple[str, list[Any]]] = []
+            if max_depth <= 0:
+                return results
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    cur_path = f"{path}.{k}"
+                    if isinstance(v, list) and len(v) > 0:
+                        results.append((cur_path, v))
+                    elif isinstance(v, (dict, list)):
+                        results.extend(_scan_all_lists(v, cur_path, max_depth - 1))
+            elif isinstance(obj, list):
+                for i, item in enumerate(obj[:5]):  # 只扫前5个防止爆
+                    if isinstance(item, (dict, list)):
+                        results.extend(_scan_all_lists(item, f"{path}[{i}]", max_depth - 1))
+            return results
 
-        # 深度搜索 items/results
-        for key in ["items", "results", "files", "entries", "saved_items", "processed_items"]:
+        all_lists = _scan_all_lists(output_payload, "output_payload") + _scan_all_lists(payload, "payload")
+
+        # 过滤出可能包含文件的列表（列表元素是 dict 且有 name/filename 等字段，或是字符串）
+        file_list_candidates: list[str] = []
+        for path, lst in all_lists:
+            if not lst:
+                continue
+            # 判断是否可能是文件列表
+            first = lst[0]
+            is_file_list = False
+            if isinstance(first, str):
+                is_file_list = True
+            elif isinstance(first, dict):
+                file_keys = {"name", "filename", "file_name", "title", "path", "source_path"}
+                if set(first.keys()) & file_keys:
+                    is_file_list = True
+            if is_file_list:
+                file_list_candidates.append(path)
+                print(f"[钉钉Bot][数据侦探] 疑似文件列表: {path} (长度={len(lst)}, 首元素类型={type(first).__name__})")
+                for item in lst:
+                    if item not in all_file_items:
+                        all_file_items.append(item)
+
+        print(f"[钉钉Bot][数据侦探] output_payload keys={list(output_payload.keys()) if isinstance(output_payload, dict) else 'N/A'}")
+        print(f"[钉钉Bot][数据侦探] payload keys={list(payload.keys()) if isinstance(payload, dict) else 'N/A'}")
+        print(f"[钉钉Bot][数据侦探] 找到文件列表字段: {file_list_candidates}, 总 items 数={len(all_file_items)}")
+
+        # 深度搜索兜底
+        for key in ["items", "results", "files", "entries", "saved_items", "processed_items", "share_results", "artifacts"]:
             found = _deep_find(all_data, key)
             for f in found:
                 if isinstance(f, list):
-                    all_file_items.extend(f)
+                    for item in f:
+                        if item not in all_file_items:
+                            all_file_items.append(item)
 
         # 提取文件名并分类
         if all_file_items:
