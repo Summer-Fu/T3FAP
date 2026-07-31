@@ -53,7 +53,7 @@ MERGE_WINDOW_SECONDS = 5
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.9.2"
+    plugin_version = "1.9.3"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -69,7 +69,11 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         return merged
 
     def set_runtime_config(self, config: dict[str, Any]) -> None:
-        self._runtime_config = self._normalize_runtime_config(config)
+        normalized = self._normalize_runtime_config(config)
+        self._runtime_config = normalized
+        keys = list(normalized.keys())
+        has_webhook = bool(str(normalized.get("webhook_url") or "").strip())
+        print(f"[钉钉Bot] set_runtime_config 被调用，keys={keys}, webhook已配置={has_webhook}")
 
     def validate_runtime_config(self, config: dict[str, Any]) -> OperationResult:
         normalized = self._normalize_runtime_config(config)
@@ -123,20 +127,28 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         event_type = str(event.get("event_type") or "unknown")
         title, content = self._build_message(event)
 
-        if self._is_configured():
+        cfg = self._resolve_config()
+        configured = bool(str(cfg.get("webhook_url") or "").strip())
+        print(f"[钉钉Bot] 收到事件: {event_type}, 配置状态: {'已配置' if configured else '未配置'}, runtime_config_keys: {list(cfg.keys())}")
+
+        if configured:
             category = self._category_for(event_type)
-            with self._lock:
-                self._pending.append({
-                    "category": category,
-                    "title": title,
-                    "content": content,
-                    "time": time.strftime("%H:%M:%S"),
-                })
-                if self._flush_timer is not None:
-                    self._flush_timer.cancel()
-                self._flush_timer = threading.Timer(MERGE_WINDOW_SECONDS, self._flush_pending)
-                self._flush_timer.daemon = True
-                self._flush_timer.start()
+            try:
+                with self._lock:
+                    self._pending.append({
+                        "category": category,
+                        "title": title,
+                        "content": content,
+                        "time": time.strftime("%H:%M:%S"),
+                    })
+                    if self._flush_timer is not None:
+                        self._flush_timer.cancel()
+                    self._flush_timer = threading.Timer(MERGE_WINDOW_SECONDS, self._flush_pending)
+                    self._flush_timer.daemon = True
+                    self._flush_timer.start()
+                print(f"[钉钉Bot] 事件已加入待发送队列，当前队列长度: {len(self._pending)}")
+            except Exception as exc:
+                print(f"[钉钉Bot] 加入队列失败: {exc}")
 
         return OperationResult(
             success=True,
@@ -145,7 +157,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 "event_type": event_type,
                 "title": title,
                 "content": content,
-                "configured": self._is_configured(),
+                "configured": configured,
             },
         ).model_dump(mode="json")
 
@@ -157,11 +169,15 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             self._pending = []
             self._flush_timer = None
 
+        print(f"[钉钉Bot] 开始批量发送，共 {len(items)} 条消息")
         try:
             title, body = self._format_merged(items)
             self._send_to_dingtalk(title, body)
-        except Exception:
-            pass
+            print(f"[钉钉Bot] 发送成功: {title}")
+        except Exception as exc:
+            print(f"[钉钉Bot] 发送失败: {exc}")
+            import traceback
+            traceback.print_exc()
 
     def _format_merged(self, items: list[dict[str, Any]]) -> tuple[str, str]:
         if len(items) == 1:
