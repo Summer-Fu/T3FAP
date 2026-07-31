@@ -1,7 +1,7 @@
 {
   "id": "automation.dingding_bot",
   "name": "钉钉 Bot",
-  "version": "1.8.5",
+  "version": "1.2.0",
   "category": "automation",
   "description": "监听任务和系统事件，通过钉钉群机器人发送通知消息。支持加签安全设置、@指定人。",
   "author": "T3FAP Community",
@@ -58,7 +58,7 @@
       "label": "启用事件列表",
       "type": "string",
       "required": false,
-      "default": "task.completed,task.failed,task.started,task.created",
+      "default": "task.completed,task.failed",
       "description": "需要发送通知的事件类型列表，多个值用英文逗号分隔。",
       "secret": false,
       "group": "通知设置"

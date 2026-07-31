@@ -1,172 +1,65 @@
-"""钉钉 Bot 通知自动化插件后端入口。"""
-
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
 import json
-import re
+import threading
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+import urllib.error
 from typing import Any
 
 from core.sdk import AutomationProvider, BasePlugin, OperationResult
 
+DEFAULT_EVENTS = ["task.completed", "task.failed"]
 
-DEFAULT_EVENTS = [
-    "task.completed",
-    "task.failed",
-    "task.started",
-    "task.created",
-]
-
-EVENT_CATEGORY: dict[str, str] = {
+EVENT_CATEGORY = {
     "task.completed": "任务完成",
     "task.failed": "任务失败",
     "task.started": "任务开始",
     "task.created": "任务创建",
+    "task.canceled": "任务取消",
+    "task.transfer": "转存任务",
+    "task.drive_download": "网盘下载",
+    "task.video_download": "视频下载",
+    "task.strm": "STRM生成",
 }
 
-CATEGORY_EMOJI: dict[str, str] = {
+CATEGORY_EMOJI = {
     "任务完成": "✅",
     "任务失败": "❌",
     "任务开始": "▶️",
+    "任务取消": "⏹️",
     "任务创建": "📝",
+    "转存任务": "📦",
+    "网盘下载": "⬇️",
+    "视频下载": "🎬",
+    "STRM生成": "📺",
     "系统通知": "🔔",
 }
 
-TASK_CATEGORY: dict[str, str] = {
-    "transfer": "转存",
-    "download": "下载",
-    "strm": "STRM 生成",
-    "cache_keep": "缓存保持",
-    "video_download": "影视下载",
-    "transcode": "转码",
-    "subtitle": "字幕",
-    "search": "搜索",
+RESOURCE_KIND_LABEL = {
+    "official_strm": "官方STRM",
+    "official_download": "官方下载",
+    "share_transfer": "分享转存",
+    "share_download": "分享下载",
 }
 
-SOURCE_LABEL: dict[str, str] = {
-    "quark": "夸克网盘",
-    "aliyun": "阿里云盘",
-    "pan115": "115 网盘",
-    "115": "115 网盘",
-    "iqiyi": "爱奇艺",
-    "bilibili": "哔哩哔哩",
-    "youku": "优酷",
-    "tencent": "腾讯视频",
-    "mango": "芒果 TV",
-    "migu": "咪咕视频",
-    "cctv": "央视网",
-    "360": "360 影视",
-    "pansou": "盘搜",
-    "official": "官方视频源",
-    "drive": "网盘",
-    "video": "影视资源",
-    "catalog": "资源目录",
-}
-
-
-def _fmt_time(iso_str: str | None) -> str:
-    if not iso_str:
-        return ""
-    try:
-        if iso_str.endswith("Z"):
-            iso_str = iso_str[:-1] + "+00:00"
-        dt = datetime.fromisoformat(iso_str).astimezone()
-        return dt.strftime("%m月%d日 %H点%M分")
-    except Exception:
-        return iso_str
-
-
-def _parse_episode_number(name: str) -> int | None:
-    patterns = [
-        r'S\d{1,2}E(\d{1,4})',
-        r'第(\d{1,4})集',
-        r'EP(\d{1,4})',
-        r'\[(\d{1,4})\]',
-        r'(\d{1,4})\.(?:mkv|mp4|avi|mov|ts|wmv)',
-        r'[-_ ](\d{1,4})[-_ .]',
-        r'^(\d{1,4})[-_ .]',
-        r'[^\d]E(\d{1,4})[^\d]',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, name, re.IGNORECASE)
-        if match:
-            try:
-                return int(match.group(1))
-            except ValueError:
-                continue
-    return None
-
-
-def _format_episode_ranges(numbers: list[int]) -> str:
-    if not numbers:
-        return ""
-    sorted_nums = sorted(set(numbers))
-    ranges: list[str] = []
-    start = sorted_nums[0]
-    prev = sorted_nums[0]
-    for n in sorted_nums[1:]:
-        if n == prev + 1:
-            prev = n
-        else:
-            if start == prev:
-                ranges.append(str(start))
-            else:
-                ranges.append(f"{start}-{prev}")
-            start = n
-            prev = n
-    if start == prev:
-        ranges.append(str(start))
-    else:
-        ranges.append(f"{start}-{prev}")
-    return "、".join(ranges)
-
-
-def _parse_category_and_source(task_type: str | None, plugin_id: str | None) -> tuple[str, str]:
-    category = "任务"
-    source = "未识别来源"
-
-    all_raw = f"{task_type or ''} {plugin_id or ''}".lower()
-
-    for key, label in TASK_CATEGORY.items():
-        if key in all_raw:
-            category = label
-            break
-
-    for key, label in SOURCE_LABEL.items():
-        if key in all_raw:
-            source = label
-            break
-
-    return category, source
-
-
-def _task_type_label(task_type: str | None, plugin_id: str | None) -> str:
-    category, source = _parse_category_and_source(task_type, plugin_id)
-    if category == "任务" and source == "系统":
-        if task_type:
-            return task_type.replace("_", " ").title()
-        if plugin_id:
-            short = plugin_id.replace("task.", "").replace("download.", "").replace("automation.", "")
-            return short.replace("_", " ").title()
-        return "任务"
-    return f"{source} {category}"
+MERGE_WINDOW_SECONDS = 5
 
 
 class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.8.5"
+    plugin_version = "1.2.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
-        self._pending: dict[str, dict[str, Any]] = {}
-        self._sent: dict[str, float] = {}
+        self._pending: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._flush_timer: threading.Timer | None = None
 
     def set_runtime_config(self, config: dict[str, Any]) -> None:
         self._runtime_config = self._normalize_runtime_config(config)
@@ -196,16 +89,13 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
         return values or list(DEFAULT_EVENTS)
 
     def test_notification(self, payload: dict[str, Any]) -> dict[str, Any]:
-        config = self._normalize_runtime_config(payload)
-        webhook_url = str(config.get("webhook_url") or "").strip()
-        if not webhook_url:
+        if not self._is_configured():
             return OperationResult(
                 success=False,
                 message="通知测试失败：缺少 webhook_url 配置。",
             ).model_dump(mode="json")
         try:
-            self._send_to_dingtalk_with_config(
-                config,
+            self._send_to_dingtalk(
                 "🔔 [测试] 钉钉 Bot 通知",
                 "这是一条测试消息。如果收到，说明钉钉 Bot 配置正确、推送链路正常。",
             )
@@ -219,135 +109,87 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
                 message=f"通知测试失败：{exc}",
             ).model_dump(mode="json")
 
-    @staticmethod
-    def _event_richness(event: dict[str, Any]) -> int:
-        payload = dict(event.get("payload") or {})
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-        score = 0
-        if data.get("saved_count") is not None or data.get("transferred_count") is not None:
-            score += 10
-        if data.get("skipped_count"):
-            score += 5
-        if data.get("target_path") or data.get("save_path"):
-            score += 3
-        if data.get("share_results"):
-            score += 8
-        if payload.get("artifacts"):
-            score += 8
-        if payload.get("summary"):
-            score += 2
-        for key in ("task_name", "display_name", "task_display_name", "full_name", "description"):
-            for container in (event, payload, data):
-                if isinstance(container, dict) and container.get(key):
-                    score += 15
-                    break
-        return score
-
-    @staticmethod
-    def _merge_events(e1: dict[str, Any], e2: dict[str, Any]) -> dict[str, Any]:
-        import copy
-        base = copy.deepcopy(e1)
-        extra = e2
-        p1 = base.get("payload") if isinstance(base.get("payload"), dict) else {}
-        p2 = extra.get("payload") if isinstance(extra.get("payload"), dict) else {}
-        d1 = p1.get("data") if isinstance(p1.get("data"), dict) else {}
-        d2 = p2.get("data") if isinstance(p2.get("data"), dict) else {}
-
-        for key in ("artifacts", "summary", "message"):
-            if not p1.get(key) and p2.get(key):
-                p1[key] = p2[key]
-
-        for key in ("saved_count", "transferred_count", "skipped_count", "renamed_count",
-                     "filtered_count", "target_path", "save_path", "share_results", "post_plugins"):
-            if d1.get(key) is None and d2.get(key) is not None:
-                d1[key] = d2[key]
-
-        for container_key, container in (("payload", p1),):
-            for key in ("task_name", "display_name", "task_display_name", "full_name", "description", "name", "title"):
-                if not base.get(key) and extra.get(key):
-                    base[key] = extra[key]
-                if not p1.get(key) and p2.get(key):
-                    p1[key] = p2[key]
-                if not d1.get(key) and d2.get(key):
-                    d1[key] = d2[key]
-
-        if d1:
-            p1["data"] = d1
-        if p1:
-            base["payload"] = p1
-        return base
-
-    def _flush_pending(self) -> None:
-        now = time.time()
-        keys_to_send: list[str] = []
-        for key, info in self._pending.items():
-            if now - info["timestamp"] >= 2:
-                keys_to_send.append(key)
-        for key in keys_to_send:
-            info = self._pending.pop(key)
-            event = info["event"]
-            title, content = self._build_message(event)
-            if self._is_configured():
-                try:
-                    self._send_to_dingtalk(title, content)
-                except Exception:
-                    pass
-            self._sent[key] = now
-
     def handle(self, event: dict[str, Any]) -> dict[str, Any]:
         event_type = str(event.get("event_type") or "unknown")
-        task_id = str(event.get("task_id") or (event.get("payload") or {}).get("task_id") or "")
-        dedup_key = f"{task_id}:{event_type}"
+        title, content = self._build_message(event)
 
-        self._flush_pending()
-
-        now = time.time()
-        if dedup_key in self._sent and (now - self._sent[dedup_key]) < 30:
-            return OperationResult(
-                success=True,
-                message=f"{self.plugin_name} 跳过重复事件（已发送）：{event_type}",
-                data={"event_type": event_type, "dedup_key": dedup_key, "skipped": True},
-            ).model_dump(mode="json")
-
-        if dedup_key in self._pending:
-            existing = self._pending[dedup_key]
-            new_score = self._event_richness(event)
-            old_score = self._event_richness(existing["event"])
-            if new_score > old_score:
-                merged = self._merge_events(existing["event"], event)
-                existing["event"] = merged
-                existing["timestamp"] = now
-            elif new_score == old_score:
-                existing["timestamp"] = now
-        else:
-            self._pending[dedup_key] = {"timestamp": now, "event": event}
-
-        if len(self._sent) > 200:
-            self._sent = {k: v for k, v in self._sent.items() if now - v < 300}
-
-        self._flush_pending()
+        if self._is_configured():
+            category = self._category_for(event_type)
+            with self._lock:
+                self._pending.append({
+                    "category": category,
+                    "title": title,
+                    "content": content,
+                    "time": time.strftime("%H:%M:%S"),
+                })
+                if self._flush_timer is not None:
+                    self._flush_timer.cancel()
+                self._flush_timer = threading.Timer(MERGE_WINDOW_SECONDS, self._flush_pending)
+                self._flush_timer.daemon = True
+                self._flush_timer.start()
 
         return OperationResult(
             success=True,
-            message=f"{self.plugin_name} 已接收事件：{event_type}（将在延迟后合并发送）",
+            message=f"{self.plugin_name} 已处理事件：{event_type}",
             data={
                 "event_type": event_type,
-                "dedup_key": dedup_key,
-                "pending_count": len(self._pending),
+                "title": title,
+                "content": content,
+                "configured": self._is_configured(),
             },
         ).model_dump(mode="json")
+
+    def _flush_pending(self) -> None:
+        with self._lock:
+            if not self._pending:
+                return
+            items = list(self._pending)
+            self._pending = []
+            self._flush_timer = None
+
+        try:
+            title, body = self._format_merged(items)
+            self._send_to_dingtalk(title, body)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _format_merged(items: list[dict[str, Any]]) -> tuple[str, str]:
+        if len(items) == 1:
+            item = items[0]
+            emoji = CATEGORY_EMOJI.get(item["category"], "🔔")
+            return f"{emoji} {item['title']}", item["content"]
+
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in items:
+            grouped.setdefault(item["category"], []).append(item)
+
+        summary_parts = []
+        for category in ["任务完成", "任务失败", "任务取消", "任务开始", "任务创建", "转存任务", "网盘下载", "视频下载", "STRM生成", "系统通知"]:
+            if category in grouped:
+                count = len(grouped[category])
+                emoji = CATEGORY_EMOJI.get(category, "🔔")
+                summary_parts.append(f"{emoji}{category}×{count}")
+
+        title = f"📢 T3 通知 ({len(items)}条) " + " ".join(summary_parts)
+
+        lines: list[str] = []
+        for category, cat_items in grouped.items():
+            emoji = CATEGORY_EMOJI.get(category, "🔔")
+            lines.append(f"【{emoji} {category}】")
+            for idx, item in enumerate(cat_items, 1):
+                lines.append(f"  {idx}. [{item['time']}] {item['content']}")
+            lines.append("")
+
+        return title, "\n".join(lines).rstrip()
 
     def _is_configured(self) -> bool:
         return bool(str(self._runtime_config.get("webhook_url") or "").strip())
 
     def _send_to_dingtalk(self, title: str, content: str) -> None:
-        self._send_to_dingtalk_with_config(self._runtime_config, title, content)
-
-    @staticmethod
-    def _send_to_dingtalk_with_config(config: dict[str, Any], title: str, content: str) -> None:
-        webhook_url = str(config.get("webhook_url") or "").strip()
-        secret = str(config.get("secret") or "").strip()
-        at_mobiles_raw = str(config.get("at_mobiles") or "").strip()
+        webhook_url = str(self._runtime_config.get("webhook_url") or "").strip()
+        secret = str(self._runtime_config.get("secret") or "").strip()
+        at_mobiles_raw = str(self._runtime_config.get("at_mobiles") or "").strip()
         at_mobiles = [m.strip() for m in at_mobiles_raw.split(",") if m.strip()] if at_mobiles_raw else []
 
         if secret:
@@ -379,224 +221,192 @@ class DingdingBotAutomationPlugin(BasePlugin, AutomationProvider):
             resp.read()
 
     @staticmethod
-    def _extract_resource_name(event: dict[str, Any], payload: dict[str, Any]) -> str:
-        data = payload.get("data") or {}
-        artifacts = payload.get("artifacts") or []
-        share_results = (data if isinstance(data, dict) else {}).get("share_results") or []
-
-        if share_results and isinstance(share_results, list):
-            for sr in share_results:
-                if isinstance(sr, dict):
-                    name = sr.get("share_name") or sr.get("title") or sr.get("name")
-                    if name and str(name).strip():
-                        return str(name).strip()
-
-        if artifacts and isinstance(artifacts, list):
-            for art in artifacts:
-                if isinstance(art, dict):
-                    title = art.get("title") or art.get("name")
-                    if title and str(title).strip() and not re.match(r'^\d+\.(mkv|mp4|avi)$', str(title), re.IGNORECASE):
-                        return str(title).strip()
-
-        for key in ("share_name", "resource_name", "name", "title", "task_name"):
-            for container in (payload, event, data if isinstance(data, dict) else {}):
-                if isinstance(container, dict):
-                    val = container.get(key)
-                    if val and str(val).strip():
-                        return str(val).strip()
-
-        task_id = str(event.get("task_id") or payload.get("task_id") or "")
-        return f"任务 #{task_id}" if task_id else "未命名任务"
-
-    @staticmethod
-    def _collect_plugin_status(payload: dict[str, Any]) -> list[tuple[str, bool, str]]:
-        data = payload.get("data") or {}
-        post_plugins = (data if isinstance(data, dict) else {}).get("post_plugins") or []
-        results: list[tuple[str, bool, str]] = []
-        for p in post_plugins:
-            pid = str(p.get("plugin_id") or "")
-            success = bool(p.get("success"))
-            message = str(p.get("message") or ("成功" if success else "失败"))
-            label = pid.replace("automation.", "").replace("_", " ").title()
-            results.append((label, success, message))
-        return results
+    def _category_for(event_type: str) -> str:
+        return EVENT_CATEGORY.get(event_type, "系统通知")
 
     @staticmethod
     def _normalize_runtime_config(config: dict[str, Any] | None) -> dict[str, Any]:
         return dict(config or {})
 
-    @staticmethod
-    def _deep_find(d: Any, keys: tuple[str, ...]) -> str | None:
-        if not isinstance(d, dict):
-            return None
-        for k, v in d.items():
-            if k.lower() in keys and v and str(v).strip():
-                return str(v).strip()
-        for k, v in d.items():
-            if isinstance(v, dict):
-                found = DingdingBotAutomationPlugin._deep_find(v, keys)
-                if found:
-                    return found
-            elif isinstance(v, list):
-                for item in v:
-                    if isinstance(item, dict):
-                        found = DingdingBotAutomationPlugin._deep_find(item, keys)
-                        if found:
-                            return found
-        return None
-
-    @staticmethod
-    def _extract_task_label(event: dict[str, Any], payload: dict[str, Any]) -> str:
-        task_id = str(event.get("task_id") or payload.get("task_id") or "")
-
-        task_name_keys = ("task_name", "task_display_name", "display_name", "display_title",
-                          "full_name", "full_title", "subtitle", "task_title", "description")
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-
-        task_name = None
-        for src in (payload, event, data):
-            if isinstance(src, dict):
-                task_name = DingdingBotAutomationPlugin._deep_find(src, task_name_keys)
-                if task_name:
-                    break
-
-        if not task_name:
-            summary = str(payload.get("summary") or payload.get("message") or "").strip()
-            blacklist = ("转存", "下载", "项到", "已完成", "completed", "跳过", "任务")
-            if summary and len(summary) <= 80 and summary.lower() not in ("task completed", "任务完成"):
-                if not any(b in summary for b in blacklist):
-                    task_name = summary
-
-        if task_id and task_name:
-            return f"#{task_id} {task_name}"
-        if task_id:
-            return f"#{task_id}"
-        return task_name or "任务"
-
-    @staticmethod
-    def _build_message(event: dict[str, Any]) -> tuple[str, str]:
+    @classmethod
+    def _build_message(cls, event: dict[str, Any]) -> tuple[str, str]:
         event_type = str(event.get("event_type") or "unknown")
         payload = dict(event.get("payload") or {})
-        data = payload.get("data") or {}
-        if not isinstance(data, dict):
-            data = {}
+        output_payload = dict(payload.get("output_payload") or {})
+        input_payload = dict(payload.get("input_payload") or {})
 
-        category = EVENT_CATEGORY.get(event_type, "系统通知")
-        emoji = CATEGORY_EMOJI.get(category, "🔔")
-        task_type = str(event.get("task_type") or "")
-        plugin_id = str(event.get("plugin_id") or "")
-        task_category, source = _parse_category_and_source(task_type, plugin_id)
+        # ── 任务标识 ──────────────────────────────────────────────
+        task_name = (
+            payload.get("task_name")
+            or payload.get("title")
+            or input_payload.get("task_name")
+            or event.get("task_id")
+            or "未命名任务"
+        )
+        task_id = str(event.get("task_id") or payload.get("task_id") or "")
+        execution_id = str(event.get("execution_id") or payload.get("execution_id") or "")
 
-        task_label = DingdingBotAutomationPlugin._extract_task_label(event, payload)
-        header = f"{emoji} T3 - {category} - {task_label}"
-        resource_name = DingdingBotAutomationPlugin._extract_resource_name(event, payload)
-        summary = str(payload.get("summary") or payload.get("message") or "").strip()
-        created_at = str(event.get("created_at") or payload.get("created_at") or "")
+        # ── 平台 / 资源类型 ───────────────────────────────────────
+        platform_name = str(payload.get("platform_name") or input_payload.get("platform_name") or "").strip()
+        media_category = str(payload.get("media_category") or input_payload.get("media_category") or "").strip()
+        sub_kind = str(payload.get("subscription_kind") or input_payload.get("subscription_kind") or "").strip()
+        sub_kind_label = RESOURCE_KIND_LABEL.get(sub_kind, sub_kind)
+        catalog_label = str(payload.get("catalog_source_label") or input_payload.get("catalog_source_label") or "").strip()
 
+        # ── 执行摘要 / 状态 ───────────────────────────────────────
+        summary = str(payload.get("summary") or output_payload.get("summary") or "").strip()
+        detail_message = str(payload.get("detail_message") or payload.get("message") or "").strip()
+        error_text = str(
+            payload.get("error_text")
+            or payload.get("error_message")
+            or payload.get("error")
+            or ""
+        ).strip()
+        status = str(event.get("status") or payload.get("status") or "").strip()
+
+        # ── 统计字段（output_payload） ─────────────────────────────
+        def _count(key: str) -> int | None:
+            v = output_payload.get(key)
+            if v is None:
+                v = payload.get(key)
+            try:
+                return int(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        saved_count = _count("saved_count")
+        skipped_count = _count("skipped_count")
+        transferred_count = _count("transferred_count")
+        renamed_count = _count("renamed_count")
+        filtered_count = _count("filtered_count")
+        cleared_payload_count = _count("cleared_payload_count")
+        generated_item_ids_count = _count("generated_item_ids_count")
+        new_item_count = _count("new_item_count")
+        last_new_data_count = _count("last_new_data_count")
+        no_update_days = _count("no_update_days")
+
+        # ── 时间 / 耗时 ────────────────────────────────────────────
+        duration_ms = _count("duration_ms")
+        duration_text = ""
+        if duration_ms is not None and duration_ms > 0:
+            sec = duration_ms / 1000
+            if sec >= 3600:
+                duration_text = f"{sec / 3600:.1f}h"
+            elif sec >= 60:
+                duration_text = f"{sec / 60:.1f}m"
+            else:
+                duration_text = f"{sec:.1f}s"
+
+        # ── 目标目录 ───────────────────────────────────────────────
+        target_dir = str(
+            payload.get("target_dir")
+            or input_payload.get("target_dir")
+            or ""
+        ).strip()
+
+        # ── 构建标签头部（任务类型 / 平台 / 资源种类） ────────────
+        tags: list[str] = []
+        if media_category:
+            tags.append(media_category)
+        if platform_name:
+            tags.append(platform_name)
+        if sub_kind_label:
+            tags.append(sub_kind_label)
+        if catalog_label:
+            tags.append(catalog_label)
+        tag_prefix = f"({'·'.join(tags)})" if tags else ""
+
+        # ── 统计行 ─────────────────────────────────────────────────
+        stat_parts: list[str] = []
+        if saved_count is not None:
+            stat_parts.append(f"转存成功 {saved_count} 项")
+        if transferred_count is not None:
+            stat_parts.append(f"已转存 {transferred_count} 项")
+        if skipped_count is not None:
+            stat_parts.append(f"跳过 {skipped_count} 项")
+        if renamed_count is not None and renamed_count > 0:
+            stat_parts.append(f"重命名 {renamed_count} 项")
+        if filtered_count is not None and filtered_count > 0:
+            stat_parts.append(f"过滤 {filtered_count} 项")
+        if generated_item_ids_count is not None:
+            stat_parts.append(f"生成 {generated_item_ids_count} 项")
+        if new_item_count is not None:
+            stat_parts.append(f"新增 {new_item_count} 项")
+        if cleared_payload_count is not None and cleared_payload_count > 0:
+            stat_parts.append(f"清理 {cleared_payload_count} 项")
+        if last_new_data_count is not None:
+            stat_parts.append(f"上次新增 {last_new_data_count} 项")
+        if no_update_days is not None and no_update_days > 0:
+            stat_parts.append(f"无更新 {no_update_days} 天")
+
+        stat_line = "｜".join(stat_parts) if stat_parts else ""
+
+        # ── 无更新精准判定 ─────────────────────────────────────────
+        is_no_update = False
+        if (
+            (saved_count is not None and saved_count == 0)
+            or (transferred_count is not None and transferred_count == 0)
+        ) and (
+            (skipped_count is not None and skipped_count > 0)
+            or (no_update_days is not None and no_update_days > 0)
+        ):
+            is_no_update = True
+
+        # ── 内容行 ─────────────────────────────────────────────────
         lines: list[str] = []
-        lines.append(f"📌 {source} {task_category}通知")
-        lines.append(f"🎬 影视名称：{resource_name}")
+        if tag_prefix:
+            lines.append(f"🏷️ {tag_prefix}")
+        if duration_text:
+            lines.append(f"⏱️ 耗时：{duration_text}")
+        if stat_line:
+            lines.append(f"📊 {stat_line}")
+        if target_dir:
+            lines.append(f"📁 目标：{target_dir}")
+        if summary and summary != detail_message:
+            lines.append(f"📝 {summary}")
+        if detail_message:
+            lines.append(f"💬 {detail_message}")
+        if is_no_update:
+            lines.append("🔄 本次无更新（已存在相同文件）")
+        if task_id:
+            lines.append(f"🆔 {task_id}")
+        if execution_id:
+            lines.append(f"🔗 {execution_id[:16]}…")
+
+        # ── 按事件类型生成标题与正文 ────────────────────────────────
+        category = cls._category_for(event_type)
+        emoji = CATEGORY_EMOJI.get(category, "🔔")
 
         if event_type == "task.completed":
-            saved_raw = data.get("saved_count") if data.get("saved_count") is not None else data.get("transferred_count")
-            saved_count = int(saved_raw) if saved_raw is not None else None
-            skipped_raw = data.get("skipped_count")
-            skipped_count = int(skipped_raw) if skipped_raw is not None else None
-            target_path = data.get("target_path") or data.get("save_path")
-
-            action = task_category if task_category != "任务" else "处理"
-            is_no_update = saved_count == 0 and skipped_count and skipped_count > 0
-
             if is_no_update:
-                lines.append(f"🔄 本次无更新（已存在相同文件）")
-            elif saved_count is not None and target_path:
-                lines.append(f"✅ 已{action}：{saved_count}项到{target_path}")
-            elif saved_count is not None:
-                lines.append(f"✅ 已{action}：{saved_count}项")
+                title = f"{emoji} {task_name} · 无更新"
             else:
-                lines.append(f"✅ 已{action}：未获取到统计信息")
+                title = f"{emoji} {task_name} · 完成"
+            return title, "\n".join(lines) if lines else f"{task_name} 已完成。"
 
-            if skipped_count is not None and skipped_count > 0:
-                lines.append(f"⏭️  已跳过：{skipped_count}项")
+        if event_type == "task.failed":
+            title = f"{emoji} {task_name} · 失败"
+            if error_text:
+                lines.insert(0, f"❌ {error_text}")
+            return title, "\n".join(lines) if lines else f"{task_name} 执行失败：{error_text or '未知错误'}"
 
-            artifacts = payload.get("artifacts") or []
-            episode_numbers: list[int] = []
-            artifact_names: list[str] = []
-            if artifacts and isinstance(artifacts, list):
-                for art in artifacts:
-                    if isinstance(art, dict):
-                        a_title = str(art.get("title") or art.get("name") or "")
-                        a_path = str(art.get("path") or "")
-                        if a_title:
-                            artifact_names.append(a_title)
-                            ep = _parse_episode_number(a_title)
-                            if ep:
-                                episode_numbers.append(ep)
-                        if not episode_numbers and a_path:
-                            ep = _parse_episode_number(a_path)
-                            if ep:
-                                episode_numbers.append(ep)
+        if event_type == "task.canceled":
+            title = f"{emoji} {task_name} · 已取消"
+            return title, "\n".join(lines) if lines else f"{task_name} 已取消。"
 
-            share_results = data.get("share_results") or []
-            if share_results and isinstance(share_results, list):
-                for sr in share_results:
-                    if isinstance(sr, dict):
-                        sr_name = str(sr.get("share_name") or "")
-                        if sr_name and sr_name not in artifact_names:
-                            artifact_names.append(sr_name)
+        if event_type == "task.started":
+            title = f"{emoji} {task_name} · 开始"
+            return title, "\n".join(lines) if lines else f"{task_name} 已开始执行。"
 
-            episode_range = _format_episode_ranges(episode_numbers)
-            latest_ep = max(episode_numbers) if episode_numbers else None
+        if event_type == "task.created":
+            title = f"{emoji} {task_name} · 已创建"
+            return title, "\n".join(lines) if lines else f"已创建新任务：{task_name}"
 
-            if episode_range:
-                lines.append(f"📺 详细剧集信息：{episode_range}")
-            else:
-                lines.append(f"📺 详细剧集信息：未获取")
-
-            if latest_ep:
-                lines.append(f"🔢 最新剧集：第{latest_ep}集")
-            elif artifact_names:
-                latest_name = artifact_names[-1]
-                if latest_name != resource_name:
-                    lines.append(f"🔢 最新剧集：{latest_name}")
-                else:
-                    lines.append(f"🔢 最新剧集：未获取")
-            else:
-                lines.append(f"🔢 最新剧集：未获取")
-
-            if target_path and not any(target_path in l for l in lines):
-                lines.append(f"📂 输出路径：{target_path}")
-
-        elif event_type == "task.failed":
-            error = str(
-                payload.get("error_message")
-                or payload.get("error")
-                or summary
-                or "未知错误"
-            ).strip()
-            lines.append(f"❌ 失败原因：{error}")
-            if created_at:
-                lines.append(f"🕐 失败时间：{_fmt_time(created_at)}")
-
-        elif event_type == "task.started":
-            if created_at:
-                lines.append(f"🕐 开始时间：{_fmt_time(created_at)}")
-
-        elif event_type == "task.created":
-            if created_at:
-                lines.append(f"🕐 创建时间：{_fmt_time(created_at)}")
-
-        if summary and event_type not in ("task.completed",):
-            lines.append(f"📝 状态：{summary}")
-
-        plugin_status = DingdingBotAutomationPlugin._collect_plugin_status(payload)
-        if plugin_status:
-            lines.append("🔌 插件状态：")
-            for label, success, message in plugin_status:
-                status_icon = "✅" if success else "❌"
-                lines.append(f"   {status_icon} {label}")
-
-        return header, "\n".join(lines)
+        # 其它事件类型（转存 / 下载 / STRM 等）
+        title = f"{emoji} {task_name}"
+        if summary and not lines:
+            lines.append(summary)
+        return title, "\n".join(lines) if lines else f"{task_name}：{event_type}"
 
 
 plugin = DingdingBotAutomationPlugin()
