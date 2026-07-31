@@ -355,7 +355,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.0.3"
+    plugin_version = "2.0.4"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -710,7 +710,12 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         }
 
         # 任务名称（优先从各个层级查找）
-        task_name_candidates = _deep_find(all_data, "task_name") + _deep_find(all_data, "title") + _deep_find(all_data, "share_name")
+        # payload.task_title 是最完整的任务名（如 "九门 (2026) 4K... - 订阅转存"）
+        task_title_val = payload.get("task_title") or output_payload.get("task_title") or _deep_find_first(all_data, "task_title")
+        task_name_candidates = []
+        if isinstance(task_title_val, str) and task_title_val:
+            task_name_candidates.append(task_title_val)
+        task_name_candidates.extend(_deep_find(all_data, "task_name") + _deep_find(all_data, "title") + _deep_find(all_data, "share_name"))
         # 过滤掉纯集数的文件名
         def _is_good_task_name(name: str) -> bool:
             if not name or not isinstance(name, str):
@@ -799,14 +804,49 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         no_update_days = _count("no_update_days")
         failed_count = _count("failed_count")
 
+        # === 从 share_results 累加统计（每个分享有自己的统计） ===
+        share_results_raw = (
+            payload.get("share_results")
+            or output_payload.get("share_results")
+            or _deep_find_first(all_data, "share_results")
+            or []
+        )
+        if isinstance(share_results_raw, list) and share_results_raw:
+            total_saved = 0
+            total_skipped = 0
+            total_filtered = 0
+            total_renamed = 0
+            share_names: list[str] = []
+            for sr in share_results_raw:
+                if isinstance(sr, dict):
+                    total_saved += int(sr.get("saved_count") or 0)
+                    total_skipped += int(sr.get("skipped_count") or 0)
+                    total_filtered += int(sr.get("filtered_count") or 0)
+                    total_renamed += int(sr.get("renamed_count") or 0)
+                    sn = sr.get("share_name")
+                    if isinstance(sn, str) and sn:
+                        share_names.append(sn)
+            # 如果顶层没有统计，用累加的值
+            if saved_count is None or saved_count == 0:
+                saved_count = total_saved if total_saved > 0 else saved_count
+            if skipped_count is None or skipped_count == 0:
+                skipped_count = total_skipped if total_skipped > 0 else skipped_count
+            if filtered_count is None or filtered_count == 0:
+                filtered_count = total_filtered if total_filtered > 0 else filtered_count
+            if renamed_count is None or renamed_count == 0:
+                renamed_count = total_renamed if total_renamed > 0 else renamed_count
+            print(f"[钉钉Bot] share_results统计: saved={total_saved}, skipped={total_skipped}, filtered={total_filtered}, shares={share_names}")
+
         # 耗时
         duration_ms = _count("duration_ms")
         duration_text = _parse_duration_ms(duration_ms)
 
-        # 目标路径
+        # 目标路径（payload.target_path 才是正确字段）
         target_dir = str(
-            payload.get("target_dir")
+            payload.get("target_path")
+            or payload.get("target_dir")
             or input_payload.get("target_dir")
+            or _deep_find_first(all_data, "target_path")
             or _deep_find_first(all_data, "target_dir")
             or _deep_find_first(all_data, "save_path")
             or _deep_find_first(all_data, "output_dir")
@@ -956,7 +996,16 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         # === 策略3：从任务日志中解析文件明细 ===
         # 例如: "skipped existing target files: 06.mkv, 01.mkv, 03.mkv"
         task_logs: list[str] = []
-        raw_logs = output_payload.get("logs") or payload.get("logs") or output_payload.get("log_entries") or payload.get("log_entries") or []
+        # 从多个来源查找日志
+        raw_logs = (
+            output_payload.get("logs")
+            or payload.get("logs")
+            or output_payload.get("log_entries")
+            or payload.get("log_entries")
+            or event.get("logs")
+            or event.get("log_entries")
+            or []
+        )
         if isinstance(raw_logs, list):
             for entry in raw_logs:
                 if isinstance(entry, str):
@@ -965,6 +1014,21 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                     msg = entry.get("message") or entry.get("msg") or ""
                     if msg:
                         task_logs.append(str(msg))
+        # 深度搜索兜底
+        if not task_logs:
+            deep_logs = _deep_find(all_data, "logs") + _deep_find(all_data, "log_entries")
+            for dl in deep_logs:
+                if isinstance(dl, list):
+                    for entry in dl:
+                        if isinstance(entry, str):
+                            task_logs.append(entry)
+                        elif isinstance(entry, dict):
+                            msg = entry.get("message") or entry.get("msg") or ""
+                            if msg:
+                                task_logs.append(str(msg))
+            print(f"[钉钉Bot][日志解析] 深度搜索找到 {len(task_logs)} 条日志")
+        else:
+            print(f"[钉钉Bot][日志解析] 直接找到 {len(task_logs)} 条日志")
 
         # 从日志中提取 skipped 文件
         skipped_from_logs: list[str] = []
