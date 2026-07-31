@@ -360,7 +360,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.1.2"
+    plugin_version = "2.1.3"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -1214,6 +1214,33 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         last_new_data_count = _count("last_new_data_count")
         no_update_days = _count("no_update_days")
         failed_count = _count("failed_count")
+        skipped_existing_local = _count("skipped_existing_local")
+        recreated_missing = _count("recreated_missing")
+        skipped_by_keywords = _count("skipped_by_keywords")
+
+        # 从列表类型字段推导数量（STRM 任务等）
+        def _list_count(key: str) -> int | None:
+            for source_dict in [output_payload, payload, input_payload]:
+                v = source_dict.get(key)
+                if isinstance(v, list):
+                    return len(v)
+            deep = _deep_find_first(all_data, key)
+            if isinstance(deep, list):
+                return len(deep)
+            return None
+
+        # generated_entry_ids / processed_entry_ids (STRM 任务)
+        generated_entry_count = _list_count("generated_entry_ids")
+        processed_entry_count = _list_count("processed_entry_ids")
+        artifacts_count = _list_count("artifacts")
+
+        if generated_item_count is None and generated_entry_count is not None:
+            generated_item_count = generated_entry_count
+
+        # 如果顶层 saved_count 为 0 但有 artifacts，用 artifacts 数量
+        if (saved_count is None or saved_count == 0) and artifacts_count is not None and artifacts_count > 0:
+            if event_type == "task.completed" and "strm" in (task_plugin_id or ""):
+                saved_count = artifacts_count
 
         # === 从 share_results 累加统计（每个分享有自己的统计） ===
         share_results_raw = (
@@ -1576,13 +1603,27 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         # -------- 统计行 --------
         stat_parts: list[str] = []
         if saved_count is not None and saved_count > 0:
-            stat_parts.append(f"转存成功 {saved_count} 项")
+            # STRM 任务用"生成"更准确
+            if "strm" in (task_plugin_id or ""):
+                stat_parts.append(f"生成 {saved_count} 项")
+            else:
+                stat_parts.append(f"转存成功 {saved_count} 项")
         elif transferred_count is not None and transferred_count > 0:
             stat_parts.append(f"已转存 {transferred_count} 项")
         if generated_item_count is not None and generated_item_count > 0:
-            stat_parts.append(f"生成 {generated_item_count} 项")
+            # 避免和上面的 saved_count 重复
+            if saved_count is None or saved_count == 0 or "strm" not in (task_plugin_id or ""):
+                stat_parts.append(f"生成 {generated_item_count} 项")
+        if processed_entry_count is not None and processed_entry_count > 0 and processed_entry_count != generated_item_count:
+            stat_parts.append(f"处理 {processed_entry_count} 项")
         if new_item_count is not None and new_item_count > 0:
             stat_parts.append(f"新增 {new_item_count} 项")
+        if skipped_existing_local is not None and skipped_existing_local > 0:
+            stat_parts.append(f"本地跳过 {skipped_existing_local} 项")
+        if recreated_missing is not None and recreated_missing > 0:
+            stat_parts.append(f"补全缺失 {recreated_missing} 项")
+        if skipped_by_keywords is not None and skipped_by_keywords > 0:
+            stat_parts.append(f"关键词排除 {skipped_by_keywords} 项")
         if skipped_count is not None and skipped_count > 0:
             stat_parts.append(f"跳过 {skipped_count} 项")
         if failed_count is not None and failed_count > 0:
