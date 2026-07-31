@@ -53,13 +53,20 @@ MERGE_WINDOW_SECONDS = 5
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "1.9.0"
+    plugin_version = "1.9.1"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
         self._pending: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._flush_timer: threading.Timer | None = None
+
+    def _resolve_config(self, override: dict[str, Any] | None = None) -> dict[str, Any]:
+        """草稿配置优先，已保存配置兜底"""
+        merged = dict(self._runtime_config)
+        if override:
+            merged.update(dict(override or {}))
+        return merged
 
     def set_runtime_config(self, config: dict[str, Any]) -> None:
         self._runtime_config = self._normalize_runtime_config(config)
@@ -83,13 +90,15 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             },
         }
 
-    def subscribed_events(self) -> list[str]:
-        raw = str(self._runtime_config.get("enabled_events") or ",".join(DEFAULT_EVENTS))
+    def subscribed_events(self, config: dict[str, Any] | None = None) -> list[str]:
+        cfg = self._resolve_config(config)
+        raw = str(cfg.get("enabled_events") or ",".join(DEFAULT_EVENTS))
         values = [item.strip() for item in raw.split(",") if item.strip()]
         return values or list(DEFAULT_EVENTS)
 
     def test_notification(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if not self._is_configured():
+        cfg = self._resolve_config(payload)
+        if not self._is_configured(cfg):
             return OperationResult(
                 success=False,
                 message="通知测试失败：缺少 webhook_url 配置。",
@@ -98,6 +107,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             self._send_to_dingtalk(
                 "🔔 [测试] 钉钉 Bot 通知",
                 "这是一条测试消息。如果收到，说明钉钉 Bot 配置正确、推送链路正常。",
+                config=cfg,
             )
             return OperationResult(
                 success=True,
@@ -182,13 +192,15 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
         return title, "\n".join(lines).rstrip()
 
-    def _is_configured(self) -> bool:
-        return bool(str(self._runtime_config.get("webhook_url") or "").strip())
+    def _is_configured(self, config: dict[str, Any] | None = None) -> bool:
+        cfg = self._resolve_config(config)
+        return bool(str(cfg.get("webhook_url") or "").strip())
 
-    def _send_to_dingtalk(self, title: str, content: str) -> None:
-        webhook_url = str(self._runtime_config.get("webhook_url") or "").strip()
-        secret = str(self._runtime_config.get("secret") or "").strip()
-        at_mobiles_raw = str(self._runtime_config.get("at_mobiles") or "").strip()
+    def _send_to_dingtalk(self, title: str, content: str, config: dict[str, Any] | None = None) -> None:
+        cfg = self._resolve_config(config)
+        webhook_url = str(cfg.get("webhook_url") or "").strip()
+        secret = str(cfg.get("secret") or "").strip()
+        at_mobiles_raw = str(cfg.get("at_mobiles") or "").strip()
         at_mobiles = [m.strip() for m in at_mobiles_raw.split(",") if m.strip()] if at_mobiles_raw else []
 
         if secret:
