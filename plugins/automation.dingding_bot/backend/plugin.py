@@ -333,13 +333,36 @@ def _parse_datetime_to_local(dt_str: str | None, tz_name: str = "Asia/Shanghai")
         return dt_str
 
 
+def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """深度合并两个字典，override 中的非空值会覆盖 base。"""
+    result = dict(base)
+    for key, val in override.items():
+        if val is None or val == "" or val == [] or val == {}:
+            continue
+        if isinstance(val, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_dicts(result[key], val)
+        elif isinstance(val, list) and isinstance(result.get(key), list):
+            merged = list(result[key])
+            for item in val:
+                if item not in merged:
+                    merged.append(item)
+            result[key] = merged
+        else:
+            result[key] = val
+    return result
+
+
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.0.0"
+    plugin_version = "2.0.1"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
+        # task_id -> {event: 合并后的事件, received_at: 收到时间戳, complete: 是否已完整}
+        self._event_buffer: dict[str, dict[str, Any]] = {}
+        # 已发送的 task_id 集合，防止重复
+        self._sent_tasks: set[str] = set()
 
     # ==================== 配置管理 ====================
 
@@ -408,39 +431,213 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 message=f"通知测试失败：{exc}",
             ).model_dump(mode="json")
 
+    # ==================== 事件去重与合并 ====================
+
+    def _get_task_key(self, event: dict[str, Any]) -> str:
+        """从事件中获取唯一标识 key。"""
+        payload = dict(event.get("payload") or {})
+        output_payload = dict(payload.get("output_payload") or {})
+        input_payload = dict(payload.get("input_payload") or {})
+
+        all_data = {
+            "event": event,
+            "payload": payload,
+            "output": output_payload,
+            "input": input_payload,
+        }
+
+        # 优先用 task_id
+        task_id = (
+            event.get("task_id")
+            or payload.get("task_id")
+            or output_payload.get("task_id")
+            or input_payload.get("task_id")
+            or _deep_find_first(all_data, "task_id")
+            or event.get("execution_id")
+            or payload.get("execution_id")
+            or _deep_find_first(all_data, "execution_id")
+            or ""
+        )
+        if task_id:
+            return f"task:{task_id}"
+
+        # fallback: 用 event_type + task_name
+        task_name_candidates = (
+            _deep_find(all_data, "task_name")
+            + _deep_find(all_data, "title")
+            + _deep_find(all_data, "share_name")
+        )
+        task_name = ""
+        for c in task_name_candidates:
+            if isinstance(c, str) and len(c) >= 4:
+                task_name = c
+                break
+
+        return f"{event.get('event_type', 'unknown')}:{task_name}"
+
+    def _is_event_complete(self, event: dict[str, Any]) -> bool:
+        """判断事件数据是否完整（有详细文件列表等）。"""
+        payload = dict(event.get("payload") or {})
+        output_payload = dict(payload.get("output_payload") or {})
+
+        # 检查是否有详细数据
+        for key in [
+            "share_results", "artifacts", "saved_files", "skipped_files",
+            "failed_files", "saved_items", "items", "results",
+        ]:
+            val = output_payload.get(key) or payload.get(key)
+            if isinstance(val, list) and len(val) > 0:
+                return True
+
+        # 检查是否有统计数据
+        for key in [
+            "saved_count", "skipped_count", "transferred_count",
+            "filtered_count", "generated_item_ids_count",
+        ]:
+            val = output_payload.get(key) or payload.get(key)
+            if val is not None and val != 0 and val != "":
+                try:
+                    if int(val) > 0:
+                        return True
+                except (ValueError, TypeError):
+                    pass
+
+        return False
+
+    def _cleanup_expired_buffer(self, max_age: float = 30.0) -> None:
+        """清理过期的 buffer 条目。"""
+        now = time.time()
+        expired_keys = [
+            k for k, v in self._event_buffer.items()
+            if now - v.get("received_at", 0) > max_age
+        ]
+        for k in expired_keys:
+            self._event_buffer.pop(k, None)
+        # 也清理已发送集合（防止无限增长）
+        if len(self._sent_tasks) > 1000:
+            self._sent_tasks = set(list(self._sent_tasks)[-500:])
+
+    def _flush_overdue_buffered(self) -> list[tuple[str, str]]:
+        """将 buffer 中超过等待时限的事件取出来准备发送。"""
+        now = time.time()
+        wait_window = 3.0  # 等待第二次事件的窗口（秒）
+        results: list[tuple[str, str]] = []
+        done_keys: list[str] = []
+
+        for key, buf in self._event_buffer.items():
+            if key in self._sent_tasks:
+                done_keys.append(key)
+                continue
+            age = now - buf.get("received_at", 0)
+            is_complete = buf.get("complete", False)
+            if is_complete or age > wait_window:
+                merged_event = buf.get("event", {})
+                title, content = self._build_message(merged_event)
+                results.append((title, content))
+                self._sent_tasks.add(key)
+                done_keys.append(key)
+
+        for k in done_keys:
+            self._event_buffer.pop(k, None)
+
+        return results
+
     # ==================== 事件处理 ====================
 
     def handle(self, event: dict[str, Any]) -> dict[str, Any]:
         event_type = str(event.get("event_type") or "unknown")
         print(f"[钉钉Bot] 收到事件: {event_type}")
 
-        title, content = self._build_message(event)
+        # 清理过期条目
+        self._cleanup_expired_buffer()
 
         cfg = self._resolve_config()
         configured = bool(str(cfg.get("webhook_url") or "").strip())
-        print(f"[钉钉Bot] 配置状态: {'已配置' if configured else '未配置'}, keys={list(cfg.keys())}")
+
+        # 立即事件（不需要等待合并的）：失败/取消/开始/创建
+        immediate_events = {"task.failed", "task.canceled", "task.started", "task.created"}
+
+        if event_type in immediate_events:
+            # 直接发送，不做合并
+            title, content = self._build_message(event)
+            if configured:
+                self._do_send(title, content, event_type)
+            return self._make_result(event_type, title, content, configured)
+
+        # 需要合并的事件（主要是 task.completed）
+        task_key = self._get_task_key(event)
+
+        # 如果已经发送过，直接跳过（去重）
+        if task_key and task_key in self._sent_tasks:
+            print(f"[钉钉Bot] 跳过重复事件: task_key={task_key}")
+            return self._make_result(event_type, "", "", configured, skipped=True)
+
+        # 判断当前事件是否完整
+        is_complete = self._is_event_complete(event)
+
+        # 合并到 buffer
+        now = time.time()
+        if task_key and task_key in self._event_buffer:
+            existing = self._event_buffer[task_key]
+            merged = _deep_merge_dicts(existing.get("event", {}), event)
+            existing["event"] = merged
+            existing["complete"] = existing.get("complete", False) or is_complete
+            print(f"[钉钉Bot] 合并事件: task_key={task_key}, complete={existing['complete']}")
+        elif task_key:
+            self._event_buffer[task_key] = {
+                "event": dict(event),
+                "received_at": now,
+                "complete": is_complete,
+            }
+            print(f"[钉钉Bot] 缓存事件: task_key={task_key}, complete={is_complete}")
+
+        # 尝试发送：完整的立即发，超时的也发
+        messages_to_send = self._flush_overdue_buffered()
 
         if configured:
-            try:
-                category = self._category_for(event_type)
-                emoji = CATEGORY_EMOJI.get(category, "🔔")
-                full_title = f"{emoji} {title}"
-                print(f"[钉钉Bot] 准备发送: {full_title}")
-                self._send_to_dingtalk(full_title, content)
-                print(f"[钉钉Bot] 发送成功")
-            except Exception as exc:
-                import traceback
-                print(f"[钉钉Bot] 发送失败: {exc}")
-                traceback.print_exc()
+            for title, content in messages_to_send:
+                self._do_send(title, content, event_type)
 
+        # 返回结果（用最后一条消息）
+        if messages_to_send:
+            last_title, last_content = messages_to_send[-1]
+            return self._make_result(event_type, last_title, last_content, configured)
+        return self._make_result(event_type, "", "", configured, buffered=True)
+
+    def _do_send(self, title: str, content: str, event_type: str) -> None:
+        """实际执行钉钉发送。"""
+        try:
+            category = self._category_for(event_type)
+            emoji = CATEGORY_EMOJI.get(category, "🔔")
+            full_title = f"{emoji} {title}"
+            print(f"[钉钉Bot] 准备发送: {full_title}")
+            self._send_to_dingtalk(full_title, content)
+            print(f"[钉钉Bot] 发送成功")
+        except Exception as exc:
+            import traceback
+            print(f"[钉钉Bot] 发送失败: {exc}")
+            traceback.print_exc()
+
+    def _make_result(
+        self, event_type: str, title: str, content: str,
+        configured: bool, skipped: bool = False, buffered: bool = False,
+    ) -> dict[str, Any]:
+        """构造返回结果。"""
+        msg = f"{self.plugin_name} 已处理事件：{event_type}"
+        if skipped:
+            msg = f"{self.plugin_name} 跳过重复事件：{event_type}"
+        elif buffered:
+            msg = f"{self.plugin_name} 已缓存事件等待合并：{event_type}"
         return OperationResult(
             success=True,
-            message=f"{self.plugin_name} 已处理事件：{event_type}",
+            message=msg,
             data={
                 "event_type": event_type,
                 "title": title,
                 "content": content,
                 "configured": configured,
+                "skipped": skipped,
+                "buffered": buffered,
             },
         ).model_dump(mode="json")
 
