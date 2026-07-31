@@ -360,7 +360,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.1.0"
+    plugin_version = "2.1.1"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -520,29 +520,90 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         except Exception as e:
             return False, str(e)
 
-    def _read_local_task_logs(self, execution_id: str) -> str:
-        """从本地文件系统读取任务执行日志。"""
+    def _read_local_task_logs(self, execution_id: str, log_file_path: str | None = None) -> str:
+        """从本地文件系统读取任务执行日志。
+
+        Args:
+            execution_id: 执行 ID
+            log_file_path: 可选，从 output_payload 中获取的精确日志路径（如 storage/runtime/task-logs/2026-07-31/exec_xxx.jsonl）
+        """
         import os
-        candidates = [
+        import datetime
+
+        candidates: list[str] = []
+
+        # 第1优先级：精确路径（来自 output_payload.log_file_path）
+        if log_file_path:
+            candidates.append(log_file_path)
+            # 也尝试不带路径前缀的
+            candidates.append(os.path.basename(log_file_path))
+
+        # 生成日期候选（今天和昨天）
+        today = datetime.date.today()
+        date_candidates = [
+            today.strftime("%Y-%m-%d"),
+            (today - datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
+        ]
+        for d in date_candidates:
+            candidates.extend([
+                f"storage/runtime/task-logs/{d}/{execution_id}.jsonl",
+                f"storage/runtime/task-logs/{d}/{execution_id}.log",
+                f"storage/runtime/task-logs/{d}/{execution_id}",
+            ])
+
+        # 不带日期的路径
+        candidates.extend([
             f"storage/runtime/task-logs/{execution_id}.log",
+            f"storage/runtime/task-logs/{execution_id}.jsonl",
             f"storage/runtime/task-logs/{execution_id}",
             f"runtime/task-logs/{execution_id}.log",
+            f"runtime/task-logs/{execution_id}.jsonl",
             "data/task-logs/{execution_id}.log",
             "logs/{execution_id}.log",
-        ]
-        # 也尝试从环境变量获取项目根目录
+        ])
+
+        # 从环境变量获取项目根目录
         project_root = os.environ.get("PROJECT_ROOT") or os.environ.get("T3_ROOT") or "."
         for rel in candidates:
             full_path = os.path.join(project_root, rel) if project_root != "." else rel
             try:
                 if os.path.isfile(full_path):
-                    with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
+                    content = ""
+                    # JSONL 文件需要逐行解析提取 message
+                    if full_path.endswith(".jsonl"):
+                        lines: list[str] = []
+                        with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                            for line in f:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    entry = __import__("json").loads(line)
+                                    if isinstance(entry, dict):
+                                        msg = entry.get("message") or entry.get("msg") or entry.get("text")
+                                        ts = entry.get("created_at") or entry.get("timestamp") or entry.get("time")
+                                        level = entry.get("level") or ""
+                                        if msg:
+                                            if ts:
+                                                lines.append(f"[{ts}] [{level}] {msg}" if level else f"[{ts}] {msg}")
+                                            else:
+                                                lines.append(str(msg))
+                                        else:
+                                            # 如果没有 message 字段，就取整行
+                                            lines.append(line)
+                                    else:
+                                        lines.append(str(entry))
+                                except Exception:
+                                    lines.append(line)
+                        content = "\n".join(lines)
+                    else:
+                        with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                            content = f.read()
                     print(f"[钉钉Bot][本地日志] 读取成功: {full_path} ({len(content)}字)")
                     return content
             except Exception as e:
                 print(f"[钉钉Bot][本地日志] 读取失败 {full_path}: {e}")
-        print(f"[钉钉Bot][本地日志] 未找到 execution_id={execution_id} 的日志文件")
+        print(f"[钉钉Bot][本地日志] 未找到 execution_id={execution_id} 的日志文件（尝试了{len(candidates)}个路径）")
         return ""
 
     # ==================== 配置管理 ====================
@@ -956,23 +1017,39 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         # 接口3: GET /api/tasks/executions/{execution_id}/logs - 执行日志
         exec_logs_api_status = "此任务不涉及"
         if execution_id:
-            ok, data = self._fetch_api(f"/api/tasks/executions/{execution_id}/logs")
-            if ok:
-                if isinstance(data, list):
+            # 尝试多个可能的日志接口路径
+            log_paths = [
+                f"/api/tasks/executions/{execution_id}/logs",
+                f"/api/executions/{execution_id}/logs",
+                f"/api/tasks/executions/{execution_id}/log",
+                f"/api/logs/{execution_id}",
+                f"/api/task-logs/{execution_id}",
+            ]
+            logs_data: Any = None
+            used_path = ""
+            for log_path in log_paths:
+                ok, data = self._fetch_api(log_path)
+                if ok:
+                    logs_data = data
+                    used_path = log_path
+                    break
+                # 404 继续试下一个，其他错误也继续
+            if logs_data is not None:
+                if isinstance(logs_data, list):
                     log_text = "\n".join(
                         str(entry.get("message") or entry) if isinstance(entry, dict) else str(entry)
-                        for entry in data
+                        for entry in logs_data
                     )
                     if log_text:
-                        all_data["exec_api_logs"] = data
+                        all_data["exec_api_logs"] = logs_data
                         if not local_logs:
                             local_logs = log_text
                             local_logs_status = f"从执行日志API获取 ({len(local_logs)}字)"
-                        exec_logs_api_status = f"已获取 ({len(data)}条)"
+                        exec_logs_api_status = f"已获取 ({len(logs_data)}条)"
                     else:
                         exec_logs_api_status = "返回空列表"
-                elif isinstance(data, dict):
-                    log_entries = data.get("logs") or data.get("log_entries") or data.get("items") or []
+                elif isinstance(logs_data, dict):
+                    log_entries = logs_data.get("logs") or logs_data.get("log_entries") or logs_data.get("items") or []
                     if isinstance(log_entries, list) and log_entries:
                         log_text = "\n".join(
                             str(e.get("message") or e) if isinstance(e, dict) else str(e)
@@ -987,9 +1064,9 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                     else:
                         exec_logs_api_status = "返回无日志"
                 else:
-                    exec_logs_api_status = f"返回格式未知: {type(data).__name__}"
+                    exec_logs_api_status = f"返回格式未知: {type(logs_data).__name__}"
             else:
-                exec_logs_api_status = f"获取失败: {data}"
+                exec_logs_api_status = f"获取失败（尝试了{len(log_paths)}个路径均未找到）"
         print(f"[钉钉Bot][平台API] 执行日志API: {exec_logs_api_status}")
 
         # 接口4: GET /api/tasks - 任务列表（兜底用）
@@ -999,7 +1076,16 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         local_logs = ""
         local_logs_status = "此任务不涉及"
         if execution_id:
-            local_logs = self._read_local_task_logs(execution_id)
+            # 从 output_payload 中获取精确的日志文件路径
+            log_file_path = output_payload.get("log_file_path") if isinstance(output_payload, dict) else None
+            if not log_file_path:
+                # 也从 all_data 的各个 output_payload 中查找
+                for key in ["exec_output_payload", "latest_exec_output_payload"]:
+                    op = all_data.get(key)
+                    if isinstance(op, dict) and op.get("log_file_path"):
+                        log_file_path = op["log_file_path"]
+                        break
+            local_logs = self._read_local_task_logs(execution_id, log_file_path)
             if local_logs:
                 local_logs_status = f"已获取 ({len(local_logs)}字)"
             else:
@@ -1354,6 +1440,26 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             print(f"[钉钉Bot][日志解析] 深度搜索找到 {len(task_logs)} 条日志")
         else:
             print(f"[钉钉Bot][日志解析] 直接找到 {len(task_logs)} 条日志")
+
+        # 从本地日志文件内容中提取（local_logs 可能是多行字符串）
+        if local_logs:
+            for line in local_logs.split("\n"):
+                line = line.strip()
+                if line:
+                    task_logs.append(line)
+            print(f"[钉钉Bot][日志解析] 加入本地日志行，共 {len(task_logs)} 条")
+
+        # 从执行详情的 logs 里也提取
+        if execution_detail:
+            exec_logs_list = execution_detail.get("logs") or []
+            if isinstance(exec_logs_list, list):
+                for entry in exec_logs_list:
+                    if isinstance(entry, str):
+                        task_logs.append(entry)
+                    elif isinstance(entry, dict):
+                        msg = entry.get("message") or entry.get("msg") or ""
+                        if msg:
+                            task_logs.append(str(msg))
 
         # 从日志中提取 skipped 文件
         skipped_from_logs: list[str] = []
