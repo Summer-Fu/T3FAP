@@ -394,7 +394,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.2.0"
+    plugin_version = "2.2.1"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -2053,6 +2053,17 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         # ==================== 平台接口获取状态区 ====================
         lines.append("")
         lines.append("═" * 15 + " 平台接口获取状态 " + "═" * 15)
+        # 显示当前实际使用的API配置（方便排查401问题）
+        __api_base_used = self._api_base or "未探测"
+        __api_cfg = self._resolve_config()
+        __cfg_base = str(__api_cfg.get("t3_api_base") or "")
+        __cfg_key = str(__api_cfg.get("t3_api_key") or "")
+        __cfg_header = str(__api_cfg.get("t3_api_header") or "")
+        __all_cfg_keys = sorted(list(__api_cfg.keys()))
+        __key_mask = __cfg_key[:8] + "***" + __cfg_key[-4:] if len(__cfg_key) > 12 else ("已设置" if __cfg_key else "未设置")
+        lines.append(f"🔧 API配置: 地址={__cfg_base or '未设置'}, Key={__key_mask}, Header={__cfg_header or 'X-API-Key(默认)'}")
+        lines.append(f"📍 API实际调用地址: {__api_base_used}")
+        lines.append(f"🔑 插件设置所有配置项: {', '.join(__all_cfg_keys)}")
         lines.append(f"📋 GET /api/tasks/{task_id}（任务详情）: {task_detail_status}")
         lines.append(f"⚙️  GET /api/tasks/executions/{execution_id}（执行详情）: {execution_detail_status}")
         lines.append(f"📜 执行日志: {exec_logs_api_status}")
