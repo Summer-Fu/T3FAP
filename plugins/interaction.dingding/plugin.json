@@ -1,7 +1,7 @@
 {
   "id": "interaction.dingding",
   "name": "钉钉交互机器人",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "category": "assistant",
   "description": "通过钉钉群机器人进行交互式操作，支持资源搜索、任务创建、任务状态查询等。@机器人输入「帮助」查看所有可用命令。",
   "author": "T3FAP Community",
@@ -102,6 +102,16 @@
       "required": false,
       "default": false,
       "description": "勾选保存后，插件会强制断开并重新建立 Stream 连接，并输出极其详细的连接日志。用于诊断 Stream 连接问题。操作后此开关会自动关闭。",
+      "secret": false,
+      "group": "交互设置"
+    },
+    {
+      "key": "show_runtime_status",
+      "label": "📊 显示运行状态和日志（保存后展示）",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "勾选并保存后，插件会在保存结果中展示完整的运行状态报告，包括：版本、已运行时长、配置状态、Stream连接状态、最近运行日志（80条）等。用于诊断插件运行问题。操作后此开关会自动关闭。",
       "secret": false,
       "group": "交互设置"
     },

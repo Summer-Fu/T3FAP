@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
+import sys
 import time
+from collections import deque
+from datetime import datetime
 from typing import Any
 
 import httpx
 
-from core.sdk import AssistantCommand, AssistantProvider, BasePlugin, OperationResult
+from core.sdk import AssistantCommand, AssistantProvider, BasePlugin, HealthReport, OperationResult
 
 DEFAULT_T3_API_BASE = "https://t3.midsummer.asia:28888/api"
 DEFAULT_T3_API_KEY = "t3mt_QzuZ7KKiKA0rEfKYB5z6jk3ktmfLAWL3NpLgxYpJbrs"
@@ -193,7 +197,7 @@ def build_command_detail(command_name: str, prefix: str = "/") -> str:
 class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
     plugin_id = "interaction.dingding"
     plugin_name = "钉钉交互机器人"
-    plugin_version = "1.1.4"
+    plugin_version = "1.1.6"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -202,6 +206,112 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
         self._stream_connected = False
         self._stream_stop_event = None
         self._first_welcome_sent = False
+
+        # 日志环形缓冲区（保存最近 200 条）
+        self._log_buffer: deque[str] = deque(maxlen=200)
+        self._log_start_time = datetime.now()
+        # 安装日志捕获
+        self._install_log_capture()
+
+    # ==================== 日志系统 ====================
+
+    def _install_log_capture(self) -> None:
+        """安装日志捕获：所有 print 输出同时写入缓冲区。"""
+        plugin_self = self
+
+        class LogCapture(io.StringIO):
+            def write(self, s: str) -> int:
+                # 先写到原始 stdout
+                try:
+                    sys.__stdout__.write(s)
+                except Exception:
+                    pass
+                # 捕获非空行到缓冲区
+                stripped = s.rstrip("\n")
+                if stripped:
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    plugin_self._log_buffer.append(f"[{timestamp}] {stripped}")
+                return len(s)
+
+            def flush(self) -> None:
+                try:
+                    sys.__stdout__.flush()
+                except Exception:
+                    pass
+
+        try:
+            sys.stdout = LogCapture()
+            self._log("日志系统已启动，开始捕获运行日志...")
+        except Exception as e:
+            # 捕获失败就不影响正常运行
+            print(f"[钉钉交互][警告] 日志捕获安装失败: {e}")
+
+    def _log(self, msg: str) -> None:
+        """输出日志（同时被捕获到缓冲区）。"""
+        print(msg)
+
+    def _get_logs(self, limit: int = 100) -> list[str]:
+        """获取最近的日志。"""
+        return list(self._log_buffer)[-limit:]
+
+    def _build_status_report(self) -> str:
+        """构建一份完整的运行状态报告（用于配置页展示）。"""
+        lines: list[str] = []
+        sep = "═" * 58
+
+        lines.append(sep)
+        lines.append("           🛰️  钉钉交互机器人 - 运行状态报告")
+        lines.append(sep)
+        lines.append(f"  版本:     v{self.plugin_version}")
+        lines.append(f"  已运行:   {self._format_uptime()}")
+        lines.append(f"  配置状态: {'✅ 已配置' if self._is_configured() else '❌ 未配置'}")
+        lines.append(f"  Stream:   {'✅ 已连接' if self._stream_connected else '⚠️  未连接'}")
+        lines.append(f"  消息数:   首条欢迎{'✅已发' if self._first_welcome_sent else '❌未发'}")
+        lines.append(f"  命令数:   {len(self.commands())} 个")
+
+        # API 状态
+        if self._api_base:
+            lines.append(f"  API地址:   {self._api_base}")
+        else:
+            lines.append(f"  API地址:   未探测（配置保存后自动探测）")
+
+        lines.append("")
+        lines.append(sep)
+        lines.append("                    📋 最近运行日志（最近80条）")
+        lines.append(sep)
+
+        logs = self._get_logs(80)
+        if not logs:
+            lines.append("  （暂无日志）")
+        else:
+            for log_line in logs:
+                # 截断过长的行
+                if len(log_line) > 200:
+                    log_line = log_line[:200] + "..."
+                lines.append(f"  {log_line}")
+
+        lines.append("")
+        lines.append(sep)
+        lines.append("  💡 提示：")
+        lines.append("     1. 如 Stream 未连接，请检查 AppKey/AppSecret 是否正确")
+        lines.append("     2. 如已连接但无消息日志，请检查机器人是否已加入群聊")
+        lines.append("     3. 勾选「Stream 连接测试」可强制重连并输出详细日志")
+        lines.append("     4. 勾选「发送单聊测试消息」可主动发送一条验证消息")
+        lines.append(sep)
+
+        return "\n".join(lines)
+
+    def _format_uptime(self) -> str:
+        """格式化已运行时间。"""
+        delta = datetime.now() - self._log_start_time
+        total_sec = int(delta.total_seconds())
+        hours, rem = divmod(total_sec, 3600)
+        minutes, seconds = divmod(rem, 60)
+        if hours > 0:
+            return f"{hours}小时{minutes}分{seconds}秒"
+        if minutes > 0:
+            return f"{minutes}分{seconds}秒"
+        return f"{seconds}秒"
 
     # ==================== 配置管理 ====================
 
@@ -232,11 +342,22 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
         self._trigger_test_message_if_needed()
         # 检测是否需要重启 Stream 连接（调试用）
         self._trigger_stream_test_if_needed()
+        # 自动关闭「刷新运行状态」开关
+        if self._runtime_config.get("show_runtime_status"):
+            self._runtime_config["show_runtime_status"] = False
 
     def validate_runtime_config(self, config: dict[str, Any]) -> OperationResult:
         normalized = self._normalize_runtime_config(config)
         errors: list[str] = []
         warnings: list[str] = []
+
+        # 检测「刷新运行状态」开关
+        raw_show = normalized.get("show_runtime_status")
+        show_status = False
+        if isinstance(raw_show, bool):
+            show_status = raw_show
+        elif isinstance(raw_show, str):
+            show_status = raw_show.lower() in ("true", "1", "yes", "on")
 
         for key in ("app_key", "app_secret"):
             if not str(normalized.get(key) or "").strip():
@@ -269,6 +390,19 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
         data = dict(normalized)
         if warnings:
             data["warnings"] = warnings
+
+        # 如果开启了「刷新运行状态」，构建详细报告作为 message
+        if show_status:
+            status_report = self._build_status_report()
+            if errors:
+                return OperationResult(
+                    success=False,
+                    message=status_report,
+                    errors=errors,
+                    data=data,
+                )
+            return OperationResult(success=True, message=status_report, data=data)
+
         if errors:
             return OperationResult(success=False, message="插件配置校验失败。", errors=errors, data=data)
         msg = "插件配置校验通过。"
