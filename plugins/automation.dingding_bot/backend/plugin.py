@@ -388,7 +388,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.1.7"
+    plugin_version = "2.1.8"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -409,6 +409,8 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         api_key = str(config.get("t3_api_key") or "").strip()
         api_header = str(config.get("t3_api_header") or "").strip()
         # 兼容环境变量（T3MT_* 优先，然后 T3_*）
+        base_from_config = bool(api_base)
+        key_from_config = bool(api_key)
         if not api_base:
             api_base = (
                 os.environ.get("T3MT_API_BASE")
@@ -416,10 +418,8 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 or os.environ.get("T3MT_HOST")
                 or ""
             )
-            # T3MT_HOST 不带 /api 后缀，需要补全
             if api_base and "/api" not in api_base:
                 api_base = api_base.rstrip("/") + "/api"
-        # 最后兜底：使用内置默认 T3MT 平台地址
         if not api_base:
             api_base = DEFAULT_T3_API_BASE
         if not api_key:
@@ -436,6 +436,12 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 or ""
             )
             api_header = env_header if env_header else DEFAULT_T3_API_HEADER
+        # 调试打印
+        base_mask = api_base[:30] + "..." if len(str(api_base)) > 30 else str(api_base)
+        key_mask = api_key[:8] + "***" + api_key[-4:] if len(api_key) > 12 else ("已设置" if api_key else "未设置")
+        src_base = "插件设置" if base_from_config else ("环境变量" if os.environ.get("T3MT_API_BASE") or os.environ.get("T3_API_BASE") else "默认值")
+        src_key = "插件设置" if key_from_config else ("环境变量" if os.environ.get("T3MT_API_KEY") or os.environ.get("T3_API_KEY") else "默认值")
+        print(f"[钉钉Bot][API凭据] base={base_mask} (来源:{src_base}), key={key_mask} (来源:{src_key}), header={api_header}")
         return api_base if api_base else None, api_key if api_key else None, api_header
 
     def _get_api_base(self) -> str | None:
@@ -443,35 +449,70 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
         优先级：
         1. 已缓存的地址
-        2. 用户配置/环境变量中的地址（但会先验证是否可达）
-        3. 自动探测容器内本地端口（T3 平台运行在 Docker 内，应优先用本地地址）
-        4. 兜底默认地址（T3MT 远程平台）
+        2. 用户在插件设置中明确配置的地址（直接使用，不再探测）
+        3. 环境变量配置的地址
+        4. 自动探测容器内本地端口（T3 平台运行在 Docker 内）
+        5. 兜底默认地址（T3MT 远程平台）
         """
         if self._api_base:
             return self._api_base
 
-        # 收集所有候选地址，按优先级排序
-        candidates: list[str] = []
         import os
 
-        # 第1组：用户明确配置的地址（最高优先级，但要先测试可达性）
-        configured_base, _, _ = self._get_api_credentials()
-        if configured_base:
-            # normalized: 去掉末尾 /api，在 fetch 时统一处理
-            normalized = configured_base.rstrip("/")
-            candidates.append(normalized)
+        # 获取用户配置的凭据
+        config = self._resolve_config()
+        configured_base = str(config.get("t3_api_base") or "").strip()
+        _, probe_key, probe_header = self._get_api_credentials()
+        probe_headers: dict[str, str] = {}
+        if probe_key and probe_header:
+            probe_headers[probe_header] = probe_key
 
-        # 第2组：容器内本地探测（T3 平台就在同一个容器里运行）
-        # 尝试常见的 T3 平台端口和 host
+        # 如果用户在插件设置中明确配置了 API 地址，直接使用（不再探测）
+        if configured_base:
+            normalized = configured_base.rstrip("/")
+            print(f"[钉钉Bot][平台API] 用户已配置 API 地址: {normalized}，直接使用")
+            # 验证一下是否可达（带认证）
+            test_url = normalized if "/api" in normalized else f"{normalized}/api"
+            try:
+                with httpx.Client(timeout=5, headers=probe_headers) as client:
+                    resp = client.get(f"{test_url}/tasks?limit=1")
+                    if resp.status_code == 200:
+                        self._api_base = normalized
+                        print(f"[钉钉Bot][平台API] 用户配置地址验证通过（认证成功）: {normalized}")
+                        return normalized
+                    else:
+                        print(f"[钉钉Bot][平台API] 用户配置地址认证状态: HTTP {resp.status_code}（仍将使用该地址）")
+            except Exception as e:
+                print(f"[钉钉Bot][平台API] 用户配置地址测试异常（仍将使用）: {e}")
+            self._api_base = normalized
+            return normalized
+
+        # 检查环境变量
+        env_base = (
+            os.environ.get("T3MT_API_BASE")
+            or os.environ.get("T3_API_BASE")
+            or os.environ.get("T3MT_HOST")
+            or ""
+        )
+        if env_base:
+            if "/api" not in env_base:
+                env_base = env_base.rstrip("/") + "/api"
+            normalized = env_base.rstrip("/")
+            print(f"[钉钉Bot][平台API] 环境变量配置 API 地址: {normalized}")
+            self._api_base = normalized
+            return normalized
+
+        # 收集候选地址，按优先级排序
+        candidates: list[str] = []
+
+        # 第1组：容器内本地探测（T3 平台就在同一个容器里运行）
         local_hosts = ["127.0.0.1", "localhost", "0.0.0.0"]
-        # 从环境变量找端口
         env_port = (
             os.environ.get("T3_API_PORT")
             or os.environ.get("PORT")
             or os.environ.get("T3_PORT")
             or ""
         )
-        # 常见端口：7860(常见)、8000(FastAPI)、3000(前端)、5173(Vite)、80(HTTP)、7861、8080
         common_ports = ["7860", "8000", "3000", "5173", "80", "7861", "8080"]
         ports_to_try: list[str] = []
         if env_port:
@@ -484,22 +525,15 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 if candidate not in candidates:
                     candidates.append(candidate)
 
-        # 第3组：兜底的远程 T3MT 平台（最后才试，因为容器里可能访问不到外网）
+        # 第2组：兜底的远程 T3MT 平台
         remote_default = DEFAULT_T3_API_BASE.rstrip("/")
         if remote_default not in candidates:
-            # remote_default 已经带 /api，需要和其他 candidate 格式一致
             if remote_default.endswith("/api"):
                 remote_base_no_api = remote_default[:-4].rstrip("/")
                 if remote_base_no_api not in candidates:
                     candidates.append(remote_base_no_api)
             else:
                 candidates.append(remote_default)
-
-        # 获取认证凭据（探测时也带上，验证是否真正可用）
-        _, probe_key, probe_header = self._get_api_credentials()
-        probe_headers: dict[str, str] = {}
-        if probe_key and probe_header:
-            probe_headers[probe_header] = probe_key
 
         # 逐个测试，优先返回认证通过（200）的地址
         print(f"[钉钉Bot][平台API] 开始探测 {len(candidates)} 个候选地址...")
@@ -663,7 +697,15 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         self._runtime_config = normalized
         keys = list(normalized.keys())
         has_webhook = bool(str(normalized.get("webhook_url") or "").strip())
+        # 打印 API 相关配置（注意不打印完整 key，只打掩码）
+        t3_base = str(normalized.get("t3_api_base") or "")
+        t3_key = str(normalized.get("t3_api_key") or "")
+        t3_header = str(normalized.get("t3_api_header") or "")
+        t3_key_mask = t3_key[:8] + "***" + t3_key[-4:] if len(t3_key) > 12 else ("已设置" if t3_key else "未设置")
         print(f"[钉钉Bot] set_runtime_config: keys={keys}, webhook已配置={has_webhook}")
+        print(f"[钉钉Bot][配置] t3_api_base={t3_base or '未设置'}, t3_api_key={t3_key_mask}, t3_api_header={t3_header or '未设置'}")
+        # 清除缓存的 API 地址，强制重新探测（因为配置可能变了）
+        self._api_base = None
 
     def validate_runtime_config(self, config: dict[str, Any]) -> OperationResult:
         normalized = self._normalize_runtime_config(config)
