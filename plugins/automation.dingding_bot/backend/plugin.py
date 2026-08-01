@@ -14,7 +14,24 @@ import httpx
 
 from core.sdk import AutomationProvider, BasePlugin, OperationResult
 
-DEFAULT_EVENTS = ["task.completed", "task.failed"]
+DEFAULT_EVENTS = [
+    "task.completed",
+    "task.failed",
+    "task.started",
+    "task.created",
+    "task.canceled",
+    "task.transfer.post_execute",
+    "task.strm.post_execute",
+    "task.download.post_execute",
+    "task.drive_download.post_execute",
+    "task.video_download.post_execute",
+    "task.short_video.post_execute",
+    "task.drive_cache_keep.post_execute",
+    "plugin.installed",
+    "plugin.uninstalled",
+    "system.startup",
+    "system.shutdown",
+]
 
 # 默认 T3 平台 API 配置（当用户未在插件设置中填写时使用）
 DEFAULT_T3_API_BASE = "http://192.168.1.219:8521/api"
@@ -28,9 +45,20 @@ EVENT_CATEGORY = {
     "task.created": "任务创建",
     "task.canceled": "任务取消",
     "task.transfer": "转存任务",
+    "task.transfer.post_execute": "转存任务完成",
     "task.drive_download": "网盘下载",
+    "task.drive_download.post_execute": "网盘下载完成",
     "task.video_download": "视频下载",
+    "task.video_download.post_execute": "视频下载完成",
+    "task.short_video.post_execute": "短视频下载完成",
     "task.strm": "STRM生成",
+    "task.strm.post_execute": "STRM生成完成",
+    "task.drive_cache_keep.post_execute": "网盘缓存保活完成",
+    "task.download.post_execute": "下载任务完成",
+    "plugin.installed": "插件安装",
+    "plugin.uninstalled": "插件卸载",
+    "system.startup": "系统启动",
+    "system.shutdown": "系统关闭",
 }
 
 CATEGORY_EMOJI = {
@@ -360,7 +388,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.1.5"
+    plugin_version = "2.1.6"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -837,16 +865,48 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
     def _handle_safe(self, event: dict[str, Any]) -> dict[str, Any]:
         event_type = str(event.get("event_type") or "unknown")
-        print(f"[钉钉Bot] 收到事件: {event_type}")
+
+        # ===== 全量事件调试打印（无论是否订阅都打印完整结构） =====
+        try:
+            event_debug = json.dumps(event, ensure_ascii=False, default=str, indent=2)
+        except Exception:
+            event_debug = str(event)
+        print(f"[钉钉Bot][全量事件] 收到事件类型: {event_type}")
+        print(f"[钉钉Bot][全量事件] 完整结构:\n{event_debug}")
+        # 也打印顶层所有字段的类型和值概览
+        for k, v in event.items():
+            if isinstance(v, (dict, list)):
+                try:
+                    preview = json.dumps(v, ensure_ascii=False, default=str)[:200]
+                except Exception:
+                    preview = str(v)[:200]
+                print(f"[钉钉Bot][字段] {k}: {type(v).__name__} = {preview}...")
+            else:
+                print(f"[钉钉Bot][字段] {k}: {type(v).__name__} = {v}")
 
         # 清理过期条目
         self._cleanup_expired_buffer()
 
         cfg = self._resolve_config()
         configured = bool(str(cfg.get("webhook_url") or "").strip())
+        subscribed = self.subscribed_events(cfg)
+        print(f"[钉钉Bot] 已订阅事件: {subscribed}")
 
-        # 立即事件（不需要等待合并的）：失败/取消/开始/创建
-        immediate_events = {"task.failed", "task.canceled", "task.started", "task.created"}
+        # 如果事件不在订阅列表中，只打印不发送
+        if event_type not in subscribed:
+            print(f"[钉钉Bot] 事件 {event_type} 不在订阅列表中，仅打印不推送")
+            return self._make_result(event_type, "", "", configured, skipped=True)
+
+        # 立即事件（不需要等待合并的）：失败/取消/开始/创建 + 所有 post_execute 事件
+        immediate_events = {
+            "task.failed", "task.canceled", "task.started", "task.created",
+            "task.transfer.post_execute", "task.strm.post_execute",
+            "task.download.post_execute", "task.drive_download.post_execute",
+            "task.video_download.post_execute", "task.short_video.post_execute",
+            "task.drive_cache_keep.post_execute",
+            "plugin.installed", "plugin.uninstalled",
+            "system.startup", "system.shutdown",
+        }
 
         if event_type in immediate_events:
             # 直接发送，不做合并
