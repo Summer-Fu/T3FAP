@@ -67,6 +67,28 @@ EVENT_CATEGORY = {
     "system.shutdown": "系统关闭",
 }
 
+EVENT_NOTIFY_CONFIG_KEY = {
+    "task.completed": "notify_task_completed",
+    "task.failed": "notify_task_failed",
+    "task.started": "notify_task_started",
+    "task.created": "notify_task_created",
+    "task.canceled": "notify_task_canceled",
+    "task.transfer.post_execute": "notify_task_completed",
+    "task.strm.post_execute": "notify_task_completed",
+    "task.download.post_execute": "notify_task_completed",
+    "task.drive_download.post_execute": "notify_task_completed",
+    "task.video_download.post_execute": "notify_task_completed",
+    "task.short_video.post_execute": "notify_task_completed",
+    "task.drive_cache_keep.post_execute": "notify_task_completed",
+    "task.subscription.post_execute": "notify_task_completed",
+    "task.catalog_batch_strm.post_execute": "notify_task_completed",
+    "task.live_catalog_batch_strm.post_execute": "notify_task_completed",
+    "system.startup": "notify_system_startup",
+    "system.shutdown": "notify_system_shutdown",
+    "plugin.installed": "notify_plugin_installed",
+    "plugin.uninstalled": "notify_plugin_uninstalled",
+}
+
 CATEGORY_EMOJI = {
     "任务完成": "✅",
     "任务失败": "❌",
@@ -413,7 +435,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.4.1"
+    plugin_version = "2.5.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -1185,6 +1207,13 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         if event_type not in subscribed:
             print(f"[钉钉Bot] 事件 {event_type} 不在订阅列表中，仅打印不推送")
             return self._make_result(event_type, "", "", configured, skipped=True)
+
+        # ===== 事件通知开关：根据配置判断是否发送该类事件 =====
+        notify_cfg_key = EVENT_NOTIFY_CONFIG_KEY.get(event_type)
+        if notify_cfg_key and notify_cfg_key in cfg:
+            if not bool(cfg.get(notify_cfg_key)):
+                print(f"[钉钉Bot] 事件 {event_type} 的通知开关已关闭（{notify_cfg_key}=false），跳过推送")
+                return self._make_result(event_type, "", "", configured, skipped=True)
 
         # ===== 所有订阅事件都立即发送（取消合并缓冲，防止STRM等事件被吞掉） =====
         try:
@@ -2031,120 +2060,210 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         else:
             status_display = "完成"
 
-        # 获取通知内容显示配置
+        # 获取通知内容显示配置（字段级开关 + 调试区开关）
         _cfg = self._resolve_config()
         show_api = bool(_cfg.get("show_api_status"))
         show_logs = bool(_cfg.get("show_task_logs"))
         show_debug = bool(_cfg.get("show_debug_info"))
+        show_task_id = bool(_cfg.get("show_task_id", True))
+        show_duration = bool(_cfg.get("show_duration", True))
+        show_task_type = bool(_cfg.get("show_task_type", True))
+        show_trigger = bool(_cfg.get("show_trigger", True))
+        show_task_name = bool(_cfg.get("show_task_name", True))
+        show_status = bool(_cfg.get("show_status", True))
+        show_target_path = bool(_cfg.get("show_target_path", True))
+        show_exec_summary = bool(_cfg.get("show_exec_summary", True))
+        show_skip_detail = bool(_cfg.get("show_skip_detail", True))
+        show_save_detail = bool(_cfg.get("show_save_detail", True))
+        show_latest_episode = bool(_cfg.get("show_latest_episode", True))
+        show_update_time = bool(_cfg.get("show_update_time", True))
+        show_other_notes = bool(_cfg.get("show_other_notes", True))
+        show_divider = bool(_cfg.get("show_divider", True))
+
+        # 分隔线辅助函数
+        def _div() -> None:
+            if show_divider:
+                lines.append("──────────────")
 
         lines: list[str] = []
 
-        if is_started:
-            # ===== 任务开始模板（极简） =====
-            lines.append(f"🆔 任务ID：{task_id}") if task_id else None
-            lines.append(f"⏱️ 耗时：{duration_text}") if duration_text else None
-            lines.append(f"🏷️ 任务类型：{type_display}")
-            lines.append(f"⚡ 触发方式：{trigger_cn}")
-            lines.append(f"📌 任务名称：{task_name}")
-            lines.append(f"📊 任务状态：开始执行")
-            if target_dir:
+        # ===== 判断事件大类，选择不同模板 =====
+        is_system_event = event_type.startswith("system.")
+        is_plugin_event = event_type.startswith("plugin.")
+
+        if is_system_event or is_plugin_event:
+            # ===== 系统/插件事件模板 =====
+            event_label = EVENT_CATEGORY.get(event_type, event_type)
+            now_str = datetime.datetime.now().strftime("%m月%d日 %H:%M")
+
+            # 从payload提取信息
+            p_msg = str(payload.get("message") or payload.get("detail") or "") if isinstance(payload, dict) else ""
+            p_name = str(payload.get("plugin_name") or payload.get("name") or payload.get("plugin_id") or "") if isinstance(payload, dict) else ""
+            p_version = str(payload.get("version") or "") if isinstance(payload, dict) else ""
+
+            if show_task_name:
+                if is_system_event:
+                    lines.append(f"📌 系统事件：{event_label}")
+                else:
+                    lines.append(f"📌 插件事件：{event_label}")
+            if show_task_type:
+                lines.append(f"🏷️ 类型：{event_label}")
+            if show_update_time:
+                lines.append(f"🕐 时间：{now_str}")
+
+            _div()
+
+            if is_plugin_event:
+                if p_name:
+                    lines.append(f"🔌 插件名称：{p_name}")
+                if p_version:
+                    lines.append(f"📝 插件版本：{p_version}")
+                if p_msg:
+                    lines.append(f"📄 详细信息：{p_msg}")
+            else:
+                # 系统事件
+                if event_type == "system.startup":
+                    lines.append("💬 平台服务已启动，可开始使用")
+                elif event_type == "system.shutdown":
+                    lines.append("💬 平台服务正在关闭/重启")
+                if p_msg:
+                    lines.append(f"📄 详细信息：{p_msg}")
+
+            _div()
+
+            if show_other_notes:
+                if is_system_event:
+                    if event_type == "system.startup":
+                        lines.append("💬 其他说明：系统已就绪，所有定时任务将按计划执行")
+                    else:
+                        lines.append("💬 其他说明：系统服务已停止，如有疑问请查看服务器日志")
+                else:
+                    if event_type == "plugin.installed":
+                        lines.append(f"💬 其他说明：插件{p_name}已安装，可在插件管理中查看配置")
+                    else:
+                        lines.append(f"💬 其他说明：插件{p_name}已卸载，相关功能已停止")
+
+        elif is_started:
+            # ===== 任务开始模板 =====
+            if show_task_id and task_id:
+                lines.append(f"🆔 任务ID：{task_id}")
+            if show_duration and duration_text:
+                lines.append(f"⏱️ 耗时：{duration_text}")
+            if show_task_type:
+                lines.append(f"🏷️ 任务类型：{type_display}")
+            if show_trigger:
+                lines.append(f"⚡ 触发方式：{trigger_cn}")
+            if show_task_name:
+                lines.append(f"📌 任务名称：{task_name}")
+            if show_status:
+                lines.append("📊 任务状态：开始执行")
+            if show_target_path and target_dir:
                 lines.append(f"📂 目标路径：{target_dir}")
         else:
-            # ===== 任务完成/失败模板（方案5：字段单独一行 + 短横线 + 图标） =====
+            # ===== 任务完成/失败/取消/创建模板（方案5：字段单独一行 + 短横线 + 图标） =====
             # 基础信息区
-            lines.append(f"🆔 任务ID：[{task_id}]") if task_id else None
-            lines.append(f"⏱️ 耗时：{duration_text}") if duration_text else None
-            lines.append(f"🏷️ 任务类型：{type_display}")
-            lines.append(f"⚡ 触发方式：{trigger_cn}")
-            lines.append(f"📌 任务名称：{task_name}")
-            lines.append(f"📊 任务状态：{status_display}")
-            if target_dir:
+            if show_task_id and task_id:
+                lines.append(f"🆔 任务ID：[{task_id}]")
+            if show_duration and duration_text:
+                lines.append(f"⏱️ 耗时：{duration_text}")
+            if show_task_type:
+                lines.append(f"🏷️ 任务类型：{type_display}")
+            if show_trigger:
+                lines.append(f"⚡ 触发方式：{trigger_cn}")
+            if show_task_name:
+                lines.append(f"📌 任务名称：{task_name}")
+            if show_status:
+                lines.append(f"📊 任务状态：{status_display}")
+            if show_target_path and target_dir:
                 lines.append(f"📂 目标路径：{target_dir}")
 
-            # 短横线分隔（约14个字符，比正文短三分之二）
-            lines.append("──────────────")
+            _div()
 
             # 执行情况统计
-            exec_parts = []
-            if saved_count is not None:
-                verb = "生成" if "strm" in (plugin_id or "") else "转存成功"
-                exec_parts.append(f"{verb} {saved_count} 项")
-            elif transferred_count is not None and transferred_count > 0:
-                exec_parts.append(f"转存 {transferred_count} 项")
-            if generated_item_count is not None and generated_item_count > 0 and "strm" not in (plugin_id or ""):
-                exec_parts.append(f"生成 {generated_item_count} 项")
-            if skipped_count is not None and skipped_count > 0:
-                exec_parts.append(f"跳过 {skipped_count} 项")
-            if filtered_count is not None and filtered_count > 0:
-                exec_parts.append(f"过滤 {filtered_count} 项")
-            if failed_count is not None and failed_count > 0:
-                exec_parts.append(f"失败 {failed_count} 项")
-            if renamed_count is not None and renamed_count > 0:
-                exec_parts.append(f"重命名 {renamed_count} 项")
-            if processed_entry_count is not None and processed_entry_count > 0:
-                exec_parts.append(f"处理 {processed_entry_count} 项")
-            if exec_parts:
-                lines.append(f"📈 执行情况：{'｜'.join(exec_parts)}")
+            if show_exec_summary:
+                exec_parts = []
+                if saved_count is not None:
+                    verb = "生成" if "strm" in (plugin_id or "") else "转存成功"
+                    exec_parts.append(f"{verb} {saved_count} 项")
+                elif transferred_count is not None and transferred_count > 0:
+                    exec_parts.append(f"转存 {transferred_count} 项")
+                if generated_item_count is not None and generated_item_count > 0 and "strm" not in (plugin_id or ""):
+                    exec_parts.append(f"生成 {generated_item_count} 项")
+                if skipped_count is not None and skipped_count > 0:
+                    exec_parts.append(f"跳过 {skipped_count} 项")
+                if filtered_count is not None and filtered_count > 0:
+                    exec_parts.append(f"过滤 {filtered_count} 项")
+                if failed_count is not None and failed_count > 0:
+                    exec_parts.append(f"失败 {failed_count} 项")
+                if renamed_count is not None and renamed_count > 0:
+                    exec_parts.append(f"重命名 {renamed_count} 项")
+                if processed_entry_count is not None and processed_entry_count > 0:
+                    exec_parts.append(f"处理 {processed_entry_count} 项")
+                if exec_parts:
+                    lines.append(f"📈 执行情况：{'｜'.join(exec_parts)}")
 
             # 跳过明细
-            if skipped_files:
-                skipped_display = _format_file_list(skipped_files)
-                lines.append(f"⏭️  跳过明细：{skipped_display}")
-            elif skipped_count is not None and skipped_count > 0 and not skipped_files:
-                skip_note = "（首次转入无跳过）" if saved_count is not None and saved_count > 0 else "（本地已存在）"
-                lines.append(f"⏭️  跳过明细：{skipped_count} 项{skip_note}")
+            if show_skip_detail:
+                if skipped_files:
+                    skipped_display = _format_file_list(skipped_files)
+                    lines.append(f"⏭️  跳过明细：{skipped_display}")
+                elif skipped_count is not None and skipped_count > 0 and not skipped_files:
+                    skip_note = "（首次转入无跳过）" if saved_count is not None and saved_count > 0 else "（本地已存在）"
+                    lines.append(f"⏭️  跳过明细：{skipped_count} 项{skip_note}")
 
             # 转存/生成情况
-            if saved_files and (saved_count is None or saved_count > 0):
-                saved_display = _format_file_list(saved_files)
-                verb = "生成" if "strm" in (plugin_id or "") else "转存"
-                lines.append(f"✅ {verb}情况：{len(saved_files)} 项，{saved_display}")
-            elif saved_count is not None and saved_count > 0:
-                verb = "生成" if "strm" in (plugin_id or "") else "转存"
-                lines.append(f"✅ {verb}情况：{saved_count} 项")
-            elif saved_count is not None and saved_count == 0:
-                verb = "生成" if "strm" in (plugin_id or "") else "转存"
-                lines.append(f"✅ {verb}情况：0 项（首次转入无{verb} / 全部已存在）")
+            if show_save_detail:
+                if saved_files and (saved_count is None or saved_count > 0):
+                    saved_display = _format_file_list(saved_files)
+                    verb = "生成" if "strm" in (plugin_id or "") else "转存"
+                    lines.append(f"✅ {verb}情况：{len(saved_files)} 项，{saved_display}")
+                elif saved_count is not None and saved_count > 0:
+                    verb = "生成" if "strm" in (plugin_id or "") else "转存"
+                    lines.append(f"✅ {verb}情况：{saved_count} 项")
+                elif saved_count is not None and saved_count == 0:
+                    verb = "生成" if "strm" in (plugin_id or "") else "转存"
+                    lines.append(f"✅ {verb}情况：0 项（首次转入无{verb} / 全部已存在）")
 
             # 最新剧集
-            episode_display_parts = []
-            if latest_episode_file:
-                episode_display_parts.append(latest_episode_file)
-            elif latest_episode_number is not None:
-                episode_display_parts.append(f"第 {latest_episode_number} 集")
-            if not episode_display_parts:
-                for f in (skipped_files + saved_files)[:2]:
-                    if f not in episode_display_parts:
-                        episode_display_parts.append(f)
-            if episode_display_parts:
-                shown = episode_display_parts[:2]
-                lines.append(f"🆕 最新剧集：{'、'.join(shown)}")
+            if show_latest_episode:
+                episode_display_parts = []
+                if latest_episode_file:
+                    episode_display_parts.append(latest_episode_file)
+                elif latest_episode_number is not None:
+                    episode_display_parts.append(f"第 {latest_episode_number} 集")
+                if not episode_display_parts:
+                    for f in (skipped_files + saved_files)[:2]:
+                        if f not in episode_display_parts:
+                            episode_display_parts.append(f)
+                if episode_display_parts:
+                    shown = episode_display_parts[:2]
+                    lines.append(f"🆕 最新剧集：{'、'.join(shown)}")
 
             # 更新日期
-            if latest_episode_update_time:
+            if show_update_time and latest_episode_update_time:
                 lines.append(f"🕐 更新日期：{latest_episode_update_time}")
 
-            # 短横线分隔
-            lines.append("──────────────")
+            _div()
 
             # 其他说明
-            other_parts = []
-            if is_no_update:
-                other_parts.append("本次无更新（已存在相同文件）")
-            if is_failed and error_text:
-                other_parts.append(f"失败原因：{error_text}")
-            elif error_text and event_type != "task.failed" and not is_failed:
-                other_parts.append(error_text)
-            if failed_files:
-                failed_display = _format_file_list(failed_files)
-                other_parts.append(f"失败文件：{failed_display}")
-            if not other_parts and detail_message and not is_failed:
-                other_parts.append(detail_message)
+            if show_other_notes:
+                other_parts = []
+                if is_no_update:
+                    other_parts.append("本次无更新（已存在相同文件）")
+                if is_failed and error_text:
+                    other_parts.append(f"失败原因：{error_text}")
+                elif error_text and event_type != "task.failed" and not is_failed:
+                    other_parts.append(error_text)
+                if failed_files:
+                    failed_display = _format_file_list(failed_files)
+                    other_parts.append(f"失败文件：{failed_display}")
+                if not other_parts and detail_message and not is_failed:
+                    other_parts.append(detail_message)
 
-            if other_parts:
-                lines.append(f"💬 其他说明：{'；'.join(other_parts)}")
-            else:
-                lines.append("💬 其他说明：无")
+                if other_parts:
+                    lines.append(f"💬 其他说明：{'；'.join(other_parts)}")
+                else:
+                    lines.append("💬 其他说明：无")
 
         # ==================== 平台接口获取状态区（可配置，默认关闭） ====================
         if show_api:
@@ -2207,12 +2326,23 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 lines.append("📦 payload:")
                 lines.append(_safe_json(payload, 2000))
 
-        # ==================== 标题构建（task_id + 任务名） ====================
+        # ==================== 标题构建 ====================
         category = self._category_for(event_type)
-
-        # 标题前缀: [task_id] 任务名 · 状态
         task_id_prefix = f"[{task_id}] " if task_id else ""
 
+        # 系统/插件事件标题
+        if is_system_event:
+            event_label = EVENT_CATEGORY.get(event_type, event_type)
+            title = f"🔔 {event_label}"
+            return title, "\n".join(lines) if lines else f"系统事件：{event_type}"
+
+        if is_plugin_event:
+            event_label = EVENT_CATEGORY.get(event_type, event_type)
+            p_name = str(payload.get("plugin_name") or payload.get("name") or payload.get("plugin_id") or "") if isinstance(payload, dict) else ""
+            title = f"🔌 {event_label}：{p_name}" if p_name else f"🔌 {event_label}"
+            return title, "\n".join(lines) if lines else f"插件事件：{event_type}"
+
+        # 任务事件标题
         if event_type == "task.completed":
             if is_no_update:
                 title = f"{task_id_prefix}{task_name} · 无更新"
@@ -2223,7 +2353,6 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         if event_type == "task.failed":
             title = f"{task_id_prefix}{task_name} · 失败"
             if error_text:
-                # 错误信息放最前面
                 lines.insert(0, f"❌ {error_text}")
             return title, "\n".join(lines) if lines else f"{task_name} 执行失败：{error_text or '未知错误'}"
 

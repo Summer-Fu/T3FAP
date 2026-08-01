@@ -1,7 +1,7 @@
 {
   "id": "automation.dingding_bot",
   "name": "钉钉 Bot",
-  "version": "2.4.1",
+  "version": "2.5.0",
   "category": "automation",
   "description": "监听任务和系统事件，通过钉钉群机器人发送通知消息。支持加签安全设置、@指定人。",
   "author": "T3FAP Community",
@@ -74,6 +74,236 @@
       "group": "通知设置"
     },
     {
+      "key": "notify_task_completed",
+      "label": "任务完成通知",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "任务执行完成时推送。示例：📊 任务状态：完成/无更新",
+      "secret": false,
+      "group": "事件通知开关"
+    },
+    {
+      "key": "notify_task_failed",
+      "label": "任务失败通知",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "任务执行失败时推送（含错误原因）。示例：📊 任务状态：失败",
+      "secret": false,
+      "group": "事件通知开关"
+    },
+    {
+      "key": "notify_task_started",
+      "label": "任务开始通知",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "任务开始执行时推送（可能较频繁，建议关闭）。",
+      "secret": false,
+      "group": "事件通知开关"
+    },
+    {
+      "key": "notify_task_created",
+      "label": "任务创建通知",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "新任务创建时推送（可能较频繁，建议关闭）。",
+      "secret": false,
+      "group": "事件通知开关"
+    },
+    {
+      "key": "notify_task_canceled",
+      "label": "任务取消通知",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "任务被取消时推送。",
+      "secret": false,
+      "group": "事件通知开关"
+    },
+    {
+      "key": "notify_system_startup",
+      "label": "系统启动通知",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "平台服务启动时推送，方便感知系统重启。",
+      "secret": false,
+      "group": "事件通知开关"
+    },
+    {
+      "key": "notify_system_shutdown",
+      "label": "系统关闭通知",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "平台服务关闭/重启时推送。",
+      "secret": false,
+      "group": "事件通知开关"
+    },
+    {
+      "key": "notify_plugin_installed",
+      "label": "插件安装通知",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "有新插件被安装时推送。",
+      "secret": false,
+      "group": "事件通知开关"
+    },
+    {
+      "key": "notify_plugin_uninstalled",
+      "label": "插件卸载通知",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "有插件被卸载时推送。",
+      "secret": false,
+      "group": "事件通知开关"
+    },
+    {
+      "key": "show_task_id",
+      "label": "显示任务ID",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「🆔 任务ID：[30]」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_duration",
+      "label": "显示耗时",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「⏱️ 耗时：12s」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_task_type",
+      "label": "显示任务类型",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「🏷️ 任务类型：订阅转存」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_trigger",
+      "label": "显示触发方式",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「⚡ 触发方式：定时触发」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_task_name",
+      "label": "显示任务名称",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「📌 任务名称：...」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_status",
+      "label": "显示任务状态",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「📊 任务状态：完成/无更新/失败」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_target_path",
+      "label": "显示目标路径",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「📂 目标路径：/订阅」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_exec_summary",
+      "label": "显示执行情况汇总",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「📈 执行情况：跳过5｜过滤5｜成功0」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_skip_detail",
+      "label": "显示跳过明细",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「⏭️ 跳过明细：433-437.mp4」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_save_detail",
+      "label": "显示转存/生成明细",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「✅ 转存情况：3项，01-03.mkv」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_latest_episode",
+      "label": "显示最新剧集",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「🆕 最新剧集：437 4k.mp4、436 4k.mp4」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_update_time",
+      "label": "显示更新日期",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「🕐 更新日期：08月01日 07:35」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_other_notes",
+      "label": "显示其他说明",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示「💬 其他说明：本次无更新」",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
+      "key": "show_divider",
+      "label": "显示分隔线",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "推送消息中显示短横线分隔（──────────────），关闭后消息更紧凑。",
+      "secret": false,
+      "group": "通知字段显示"
+    },
+    {
       "key": "t3_api_base",
       "label": "T3 平台 API 地址",
       "type": "string",
@@ -109,9 +339,9 @@
       "type": "boolean",
       "required": false,
       "default": false,
-      "description": "是否在推送中显示平台接口获取状态（API配置、各接口调用结果等）。关闭可让消息更简洁。",
+      "description": "在推送末尾显示平台接口获取状态区（API配置、任务详情/执行详情/监控等各接口调用结果）。调试用，日常建议关闭。",
       "secret": false,
-      "group": "通知内容"
+      "group": "调试信息推送选项"
     },
     {
       "key": "show_task_logs",
@@ -119,9 +349,9 @@
       "type": "boolean",
       "required": false,
       "default": false,
-      "description": "是否在推送中显示任务执行滚动日志（本地日志文件 + API提取的日志）。关闭可让消息更简洁。",
+      "description": "在推送末尾显示任务执行日志区（滚动日志，最多30条）。调试用，日常建议关闭。",
       "secret": false,
-      "group": "通知内容"
+      "group": "调试信息推送选项"
     },
     {
       "key": "show_debug_info",
@@ -129,9 +359,9 @@
       "type": "boolean",
       "required": false,
       "default": false,
-      "description": "是否在推送中显示调试数据（event/payload/output_payload 全量字段、任务详情keys等）。主要用于排查问题，日常建议关闭。",
+      "description": "在推送末尾显示调试数据区（event/payload/output_payload全量字段、任务详情keys等）。调试用，日常建议关闭。",
       "secret": false,
-      "group": "通知内容"
+      "group": "调试信息推送选项"
     }
   ],
   "ui": {
