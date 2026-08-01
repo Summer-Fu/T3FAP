@@ -394,7 +394,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.2.4"
+    plugin_version = "2.2.5"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -1350,6 +1350,9 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
         # 接口3: 从执行详情中提取日志（平台没有独立的执行日志API接口，已通过OpenAPI验证）
         exec_logs_api_status = "平台无独立执行日志API接口（已验证）"
+        # 提前初始化日志变量（防止后续代码路径都会用到）
+        local_logs = ""
+        local_logs_status = "此任务不涉及"
         # 从 execution_detail 中提取日志（如果有的话）
         if execution_detail:
             exec_api_logs = execution_detail.get("logs") or execution_detail.get("log_entries") or []
@@ -1406,8 +1409,6 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         plugins_list_status = "此任务不涉及"
 
         # 接口8: 从本地文件系统读取任务执行日志
-        local_logs = ""
-        local_logs_status = "此任务不涉及"
         if execution_id:
             # 从 output_payload 中获取精确的日志文件路径
             log_file_path = output_payload.get("log_file_path") if isinstance(output_payload, dict) else None
