@@ -1,0 +1,123 @@
+{
+  "id": "interaction.dingding",
+  "name": "钉钉交互机器人",
+  "version": "1.0.0",
+  "category": "assistant",
+  "description": "通过钉钉群机器人进行交互式操作，支持资源搜索、任务创建、任务状态查询等。@机器人输入「帮助」查看所有可用命令。",
+  "author": "T3FAP Community",
+  "homepage": "",
+  "license": "MIT",
+  "core_version": ">=1.0.0 <2.0.0",
+  "contract_version": "1.0",
+  "capabilities": [
+    "assistant.command_handler",
+    "interaction.dingtalk"
+  ],
+  "backend": {
+    "entry": "backend.plugin:plugin"
+  },
+  "permissions": [
+    "network",
+    "secret.read"
+  ],
+  "dependencies": [],
+  "optional_dependencies": [
+    "dingtalk-stream"
+  ],
+  "config_schema": [
+    {
+      "key": "enabled",
+      "label": "启用插件",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "是否启用钉钉交互机器人。",
+      "secret": false,
+      "group": "基础设置"
+    },
+    {
+      "key": "app_key",
+      "label": "钉钉应用 AppKey",
+      "type": "string",
+      "required": true,
+      "default": "",
+      "description": "钉钉开放平台创建的企业内部应用的 AppKey，用于 Stream 模式连接。",
+      "secret": true,
+      "group": "基础设置"
+    },
+    {
+      "key": "app_secret",
+      "label": "钉钉应用 AppSecret",
+      "type": "string",
+      "required": true,
+      "default": "",
+      "description": "钉钉开放平台创建的企业内部应用的 AppSecret。",
+      "secret": true,
+      "group": "基础设置"
+    },
+    {
+      "key": "robot_code",
+      "label": "机器人编码",
+      "type": "string",
+      "required": false,
+      "default": "",
+      "description": "钉钉机器人编码（可选，用于区分多个机器人）。",
+      "secret": false,
+      "group": "基础设置"
+    },
+    {
+      "key": "command_prefix",
+      "label": "命令前缀",
+      "type": "string",
+      "required": false,
+      "default": "/",
+      "description": "命令识别前缀，默认为 /。例如 /搜索 妖神记。",
+      "secret": false,
+      "group": "交互设置"
+    },
+    {
+      "key": "t3_api_base",
+      "label": "T3 平台 API 地址",
+      "type": "string",
+      "required": false,
+      "default": "https://t3.midsummer.asia:28888/api",
+      "description": "T3 平台的 API 基础地址。插件运行在容器内时可自动探测本地地址。",
+      "secret": false,
+      "group": "高级设置"
+    },
+    {
+      "key": "t3_api_key",
+      "label": "T3 平台 API Key",
+      "type": "string",
+      "required": false,
+      "default": "t3mt_QzuZ7KKiKA0rEfKYB5z6jk3ktmfLAWL3NpLgxYpJbrs",
+      "description": "T3 平台的 API Key，用于调用平台接口。",
+      "secret": true,
+      "group": "高级设置"
+    },
+    {
+      "key": "t3_api_header",
+      "label": "T3 平台 API 认证头",
+      "type": "string",
+      "required": false,
+      "default": "X-API-Key",
+      "description": "API 认证使用的 HTTP Header 名称，默认 X-API-Key。",
+      "secret": false,
+      "group": "高级设置"
+    }
+  ],
+  "ui": {
+    "menus": [],
+    "settings_sections": [
+      {
+        "key": "interaction.dingding",
+        "title": "钉钉交互机器人"
+      }
+    ],
+    "task_templates": []
+  },
+  "healthcheck": {
+    "enabled": true,
+    "interval_seconds": 120
+  }
+}
