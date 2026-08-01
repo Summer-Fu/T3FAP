@@ -394,7 +394,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.2.2"
+    plugin_version = "2.2.3"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -455,10 +455,11 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
         优先级：
         1. 已缓存的地址
-        2. 用户在插件设置中明确配置的地址（直接使用，不再探测）
-        3. 环境变量配置的地址
-        4. 自动探测容器内本地端口（T3 平台运行在 Docker 内）
-        5. 兜底默认地址（T3MT 远程平台）
+        2. 从用户配置中提取端口，探测本地回环（插件在Docker内，192.168.x.x可能不可达）
+        3. 用户配置的地址（验证通过才用）
+        4. 环境变量配置的地址
+        5. 自动探测容器内本地端口
+        6. 兜底默认地址
         """
         if self._api_base:
             return self._api_base
@@ -469,27 +470,61 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         config = self._resolve_config()
         configured_base = str(config.get("t3_api_base") or "").strip()
         _, probe_key, probe_header = self._get_api_credentials()
+        # 探测时同时发送多种认证header（和_fetch_api保持一致）
         probe_headers: dict[str, str] = {}
-        if probe_key and probe_header:
+        if probe_key:
             probe_headers[probe_header] = probe_key
+            probe_headers["Authorization"] = f"Bearer {probe_key}"
+            if probe_header.lower() != "x-api-key":
+                probe_headers["x-api-key"] = probe_key
 
-        # 如果用户在插件设置中明确配置了 API 地址，直接使用（不再探测）
+        # ===== 从用户配置中提取端口，优先探测本地回环 =====
         if configured_base:
+            import re
+            # 提取端口号
+            port_match = re.search(r":(\d+)", configured_base)
+            configured_port = port_match.group(1) if port_match else None
+            # 提取协议
+            scheme = "https" if configured_base.startswith("https") else "http"
+
+            # 用配置的端口探测本地回环
+            if configured_port:
+                local_candidates = [
+                    f"{scheme}://127.0.0.1:{configured_port}",
+                    f"{scheme}://localhost:{configured_port}",
+                ]
+                for local_base in local_candidates:
+                    test_url = local_base if "/api" in local_base else f"{local_base}/api"
+                    try:
+                        with httpx.Client(timeout=3, headers=probe_headers) as client:
+                            resp = client.get(f"{test_url}/tasks?limit=1")
+                            if resp.status_code == 200:
+                                self._api_base = local_base
+                                print(f"[钉钉Bot][平台API] 本地回环探测成功（认证通过）: {local_base}")
+                                return local_base
+                            elif resp.status_code == 401:
+                                print(f"[钉钉Bot][平台API] 本地回环可达但认证失败: {local_base} (HTTP 401)")
+                            else:
+                                print(f"[钉钉Bot][平台API] 本地回环状态: {local_base} (HTTP {resp.status_code})")
+                    except Exception as e:
+                        print(f"[钉钉Bot][平台API] 本地回环探测失败: {local_base} ({e})")
+
+            # 本地回环不通，再用用户配置的地址试试
             normalized = configured_base.rstrip("/")
-            print(f"[钉钉Bot][平台API] 用户已配置 API 地址: {normalized}，直接使用")
-            # 验证一下是否可达（带认证）
+            print(f"[钉钉Bot][平台API] 尝试用户配置的 API 地址: {normalized}")
             test_url = normalized if "/api" in normalized else f"{normalized}/api"
             try:
                 with httpx.Client(timeout=5, headers=probe_headers) as client:
                     resp = client.get(f"{test_url}/tasks?limit=1")
                     if resp.status_code == 200:
                         self._api_base = normalized
-                        print(f"[钉钉Bot][平台API] 用户配置地址验证通过（认证成功）: {normalized}")
+                        print(f"[钉钉Bot][平台API] 用户配置地址验证通过: {normalized}")
                         return normalized
                     else:
-                        print(f"[钉钉Bot][平台API] 用户配置地址认证状态: HTTP {resp.status_code}（仍将使用该地址）")
+                        print(f"[钉钉Bot][平台API] 用户配置地址认证状态: HTTP {resp.status_code}")
             except Exception as e:
-                print(f"[钉钉Bot][平台API] 用户配置地址测试异常（仍将使用）: {e}")
+                print(f"[钉钉Bot][平台API] 用户配置地址测试异常: {e}")
+            # 即使认证失败也用用户配置的地址（可能key不对，但地址是对的）
             self._api_base = normalized
             return normalized
 
@@ -1105,68 +1140,14 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             print(f"[钉钉Bot] 事件 {event_type} 不在订阅列表中，仅打印不推送")
             return self._make_result(event_type, "", "", configured, skipped=True)
 
-        # 立即事件（不需要等待合并的）：失败/取消/开始/创建 + 所有 post_execute 事件
-        is_post_execute = "post_execute" in event_type
-        immediate_events = {
-            "task.failed", "task.canceled", "task.started", "task.created",
-            "task.transfer.post_execute", "task.strm.post_execute",
-            "task.download.post_execute", "task.drive_download.post_execute",
-            "task.video_download.post_execute", "task.short_video.post_execute",
-            "task.drive_cache_keep.post_execute", "task.subscription.post_execute",
-            "task.catalog_batch_strm.post_execute", "task.live_catalog_batch_strm.post_execute",
-            "plugin.installed", "plugin.uninstalled",
-            "system.startup", "system.shutdown",
-        }
-
-        if event_type in immediate_events or is_post_execute:
-            # 直接发送，不做合并
-            try:
-                title, content = self._safe_build_message(event)
-            except Exception as exc:
-                title, content = f"[{event.get('task_id', '')}] 通知", f"构建消息失败: {exc}"
-            if configured:
-                self._do_send(title, content, event_type)
-            return self._make_result(event_type, title, content, configured)
-
-        # 需要合并的事件（主要是 task.completed）
-        task_key = self._get_task_key(event)
-
-        # 如果已经发送过，直接跳过（去重）
-        if task_key and task_key in self._sent_tasks:
-            print(f"[钉钉Bot] 跳过重复事件: task_key={task_key}")
-            return self._make_result(event_type, "", "", configured, skipped=True)
-
-        # 判断当前事件是否完整
-        is_complete = self._is_event_complete(event)
-
-        # 合并到 buffer
-        now = time.time()
-        if task_key and task_key in self._event_buffer:
-            existing = self._event_buffer[task_key]
-            merged = _deep_merge_dicts(existing.get("event", {}), event)
-            existing["event"] = merged
-            existing["complete"] = existing.get("complete", False) or is_complete
-            print(f"[钉钉Bot] 合并事件: task_key={task_key}, complete={existing['complete']}")
-        elif task_key:
-            self._event_buffer[task_key] = {
-                "event": dict(event),
-                "received_at": now,
-                "complete": is_complete,
-            }
-            print(f"[钉钉Bot] 缓存事件: task_key={task_key}, complete={is_complete}")
-
-        # 尝试发送：完整的立即发，超时的也发
-        messages_to_send = self._flush_overdue_buffered()
-
+        # ===== 所有订阅事件都立即发送（取消合并缓冲，防止STRM等事件被吞掉） =====
+        try:
+            title, content = self._safe_build_message(event)
+        except Exception as exc:
+            title, content = f"[{event.get('task_id', '')}] 通知", f"构建消息失败: {exc}"
         if configured:
-            for title, content in messages_to_send:
-                self._do_send(title, content, event_type)
-
-        # 返回结果（用最后一条消息）
-        if messages_to_send:
-            last_title, last_content = messages_to_send[-1]
-            return self._make_result(event_type, last_title, last_content, configured)
-        return self._make_result(event_type, "", "", configured, buffered=True)
+            self._do_send(title, content, event_type)
+        return self._make_result(event_type, title, content, configured)
 
     def _do_send(self, title: str, content: str, event_type: str) -> None:
         """实际执行钉钉发送。"""
