@@ -388,7 +388,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.1.8"
+    plugin_version = "2.1.9"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -589,13 +589,17 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         headers: dict[str, str] = {}
         if api_key and api_header_name:
             headers[api_header_name] = api_key
+        key_mask = api_key[:8] + "***" + api_key[-4:] if api_key and len(api_key) > 12 else ("已设置" if api_key else "未设置")
+        print(f"[钉钉Bot][API调用] GET {url}  header={api_header_name} key={key_mask}")
         try:
             with httpx.Client(timeout=10, headers=headers) as client:
                 resp = client.get(url)
+                print(f"[钉钉Bot][API调用] 结果: HTTP {resp.status_code}")
                 if resp.status_code == 200:
                     return True, resp.json()
                 return False, f"HTTP {resp.status_code}: {resp.text[:300]}"
         except Exception as e:
+            print(f"[钉钉Bot][API调用] 异常: {e}")
             return False, str(e)
 
     def _read_local_task_logs(self, execution_id: str, log_file_path: str | None = None) -> str:
@@ -710,19 +714,81 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     def validate_runtime_config(self, config: dict[str, Any]) -> OperationResult:
         normalized = self._normalize_runtime_config(config)
         errors: list[str] = []
+        warnings: list[str] = []
         if not str(normalized.get("webhook_url") or "").strip():
             errors.append("缺少必填配置：webhook_url")
+        # 如果配置了 API 地址，测试联通性
+        t3_base = str(normalized.get("t3_api_base") or "").strip()
+        t3_key = str(normalized.get("t3_api_key") or "").strip()
+        t3_header = str(normalized.get("t3_api_header") or "").strip() or DEFAULT_T3_API_HEADER
+        if t3_base and t3_key:
+            print(f"[钉钉Bot][配置校验] 测试 API 联通性: {t3_base}")
+            test_url = t3_base if t3_base.endswith("/api") or "/api/" in t3_base else t3_base.rstrip("/") + "/api"
+            try:
+                test_headers = {t3_header: t3_key}
+                with httpx.Client(timeout=5, headers=test_headers) as client:
+                    resp = client.get(f"{test_url}/tasks?limit=1")
+                    if resp.status_code == 200:
+                        print(f"[钉钉Bot][配置校验] API 联通性测试通过（认证成功）")
+                    elif resp.status_code == 401:
+                        msg = f"API 认证失败（HTTP 401）：请检查 API Key 是否正确。Key 预览: {t3_key[:8]}***{t3_key[-4:] if len(t3_key) > 12 else ''}"
+                        warnings.append(msg)
+                        print(f"[钉钉Bot][配置校验] {msg}")
+                    else:
+                        msg = f"API 联通性异常（HTTP {resp.status_code}）：{resp.text[:200]}"
+                        warnings.append(msg)
+                        print(f"[钉钉Bot][配置校验] {msg}")
+            except Exception as e:
+                msg = f"API 联通性测试失败（无法连接）：{e}"
+                warnings.append(msg)
+                print(f"[钉钉Bot][配置校验] {msg}")
+        elif not t3_base and not t3_key:
+            print(f"[钉钉Bot][配置校验] 未配置 T3 平台 API，将使用本地日志数据源")
+        elif not t3_key:
+            warnings.append("已配置 API 地址但未配置 API Key，平台接口将无法获取数据。")
+        data = dict(normalized)
+        if warnings:
+            data["warnings"] = warnings
         if errors:
-            return OperationResult(success=False, message="插件配置校验失败。", errors=errors)
-        return OperationResult(success=True, message="插件配置校验通过。", data=normalized)
+            return OperationResult(success=False, message="插件配置校验失败。", errors=errors, data=data)
+        msg = "插件配置校验通过。"
+        if warnings:
+            msg = "插件配置校验通过（有警告）：" + "；".join(warnings)
+        return OperationResult(success=True, message=msg, data=data)
 
     def health(self, ctx: dict[str, Any]) -> dict[str, Any]:
+        api_base_used = self._api_base or "未探测"
+        api_status = "unknown"
+        api_msg = ""
+        # 简单测试 API 联通性
+        if self._api_base:
+            try:
+                _, api_key, api_header = self._get_api_credentials()
+                test_headers = {api_header: api_key} if api_key and api_header else {}
+                test_url = self._api_base if "/api" in self._api_base else f"{self._api_base}/api"
+                with httpx.Client(timeout=3, headers=test_headers) as client:
+                    resp = client.get(f"{test_url}/tasks?limit=1")
+                    if resp.status_code == 200:
+                        api_status = "ok"
+                        api_msg = "平台API连接正常（认证通过）"
+                    elif resp.status_code == 401:
+                        api_status = "error"
+                        api_msg = "平台API认证失败（401），请检查API Key"
+                    else:
+                        api_status = "degraded"
+                        api_msg = f"平台API响应异常（HTTP {resp.status_code}）"
+            except Exception as e:
+                api_status = "error"
+                api_msg = f"平台API连接失败：{e}"
         return {
             "status": "ok",
             "message": "钉钉 Bot 通知插件运行正常。",
             "details": {
                 "configured": self._is_configured(),
                 "subscribed_events": self.subscribed_events(),
+                "api_base": api_base_used,
+                "api_status": api_status,
+                "api_message": api_msg,
             },
         }
 
