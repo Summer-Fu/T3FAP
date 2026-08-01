@@ -27,6 +27,9 @@ DEFAULT_EVENTS = [
     "task.video_download.post_execute",
     "task.short_video.post_execute",
     "task.drive_cache_keep.post_execute",
+    "task.subscription.post_execute",
+    "task.catalog_batch_strm.post_execute",
+    "task.live_catalog_batch_strm.post_execute",
     "plugin.installed",
     "plugin.uninstalled",
     "system.startup",
@@ -55,6 +58,9 @@ EVENT_CATEGORY = {
     "task.strm.post_execute": "STRM生成完成",
     "task.drive_cache_keep.post_execute": "网盘缓存保活完成",
     "task.download.post_execute": "下载任务完成",
+    "task.subscription.post_execute": "订阅任务完成",
+    "task.catalog_batch_strm.post_execute": "批量STRM生成完成",
+    "task.live_catalog_batch_strm.post_execute": "直播批量STRM生成完成",
     "plugin.installed": "插件安装",
     "plugin.uninstalled": "插件卸载",
     "system.startup": "系统启动",
@@ -388,7 +394,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.1.9"
+    plugin_version = "2.2.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -825,6 +831,75 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 message=f"通知测试失败：{exc}",
             ).model_dump(mode="json")
 
+    def test_api_connectivity(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """测试平台API联通性。在插件设置页面的「测试」按钮调用。"""
+        cfg = self._resolve_config(payload)
+        t3_base = str(cfg.get("t3_api_base") or "").strip()
+        t3_key = str(cfg.get("t3_api_key") or "").strip()
+        t3_header = str(cfg.get("t3_api_header") or "").strip() or DEFAULT_T3_API_HEADER
+
+        results: list[str] = []
+
+        if not t3_base:
+            return OperationResult(
+                success=False,
+                message="API 测试失败：未配置 T3 平台 API 地址。",
+                data={"results": ["未配置 t3_api_base"]},
+            ).model_dump(mode="json")
+        if not t3_key:
+            return OperationResult(
+                success=False,
+                message="API 测试失败：未配置 T3 平台 API Key。",
+                data={"results": ["未配置 t3_api_key"]},
+            ).model_dump(mode="json")
+
+        # 规范化 URL
+        test_base = t3_base.rstrip("/")
+        if "/api" not in test_base:
+            test_base = test_base + "/api"
+
+        # 测试的接口列表
+        test_endpoints = [
+            ("GET /api/tasks", f"{test_base}/tasks?limit=1", True),
+            ("GET /api/monitor/overview", f"{test_base}/monitor/overview", True),
+            ("GET /api/monitor/executions", f"{test_base}/monitor/executions?limit=3", True),
+            ("GET /api/health", f"{test_base}/health", False),
+            ("GET /api/plugins", f"{test_base}/plugins", True),
+            ("GET /openapi.json", t3_base.replace("/api", "") + "/openapi.json", False),
+        ]
+
+        headers = {t3_header: t3_key}
+        print(f"[钉钉Bot][API测试] 开始测试 {len(test_endpoints)} 个接口，地址: {test_base}")
+
+        all_ok = True
+        for name, url, need_auth in test_endpoints:
+            try:
+                req_headers = headers if need_auth else {}
+                with httpx.Client(timeout=5, headers=req_headers) as client:
+                    resp = client.get(url)
+                    if resp.status_code == 200:
+                        results.append(f"✅ {name} → 200 OK")
+                    elif resp.status_code == 401:
+                        results.append(f"❌ {name} → 401 未授权（API Key 无效）")
+                        all_ok = False
+                    else:
+                        results.append(f"⚠️ {name} → HTTP {resp.status_code}")
+                        all_ok = False
+            except Exception as e:
+                results.append(f"❌ {name} → 连接失败: {e}")
+                all_ok = False
+
+        print(f"[钉钉Bot][API测试] 完成，结果: {'全部通过' if all_ok else '存在问题'}")
+        for r in results:
+            print(f"  {r}")
+
+        msg = "API 联通性测试通过！" if all_ok else "API 联通性测试存在问题，请检查配置。"
+        return OperationResult(
+            success=all_ok,
+            message=msg + "\n" + "\n".join(results),
+            data={"results": results, "api_base": test_base},
+        ).model_dump(mode="json")
+
     # ==================== 事件去重与合并 ====================
 
     def _get_task_key(self, event: dict[str, Any]) -> str:
@@ -1022,17 +1097,19 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             return self._make_result(event_type, "", "", configured, skipped=True)
 
         # 立即事件（不需要等待合并的）：失败/取消/开始/创建 + 所有 post_execute 事件
+        is_post_execute = "post_execute" in event_type
         immediate_events = {
             "task.failed", "task.canceled", "task.started", "task.created",
             "task.transfer.post_execute", "task.strm.post_execute",
             "task.download.post_execute", "task.drive_download.post_execute",
             "task.video_download.post_execute", "task.short_video.post_execute",
-            "task.drive_cache_keep.post_execute",
+            "task.drive_cache_keep.post_execute", "task.subscription.post_execute",
+            "task.catalog_batch_strm.post_execute", "task.live_catalog_batch_strm.post_execute",
             "plugin.installed", "plugin.uninstalled",
             "system.startup", "system.shutdown",
         }
 
-        if event_type in immediate_events:
+        if event_type in immediate_events or is_post_execute:
             # 直接发送，不做合并
             try:
                 title, content = self._safe_build_message(event)
@@ -1250,65 +1327,64 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 execution_detail_status = f"获取失败: {data}"
         print(f"[钉钉Bot][平台API] 执行详情: {execution_detail_status}")
 
-        # 接口3: GET /api/tasks/executions/{execution_id}/logs - 执行日志
-        exec_logs_api_status = "此任务不涉及"
-        if execution_id:
-            # 尝试多个可能的日志接口路径
-            log_paths = [
-                f"/api/tasks/executions/{execution_id}/logs",
-                f"/api/executions/{execution_id}/logs",
-                f"/api/tasks/executions/{execution_id}/log",
-                f"/api/logs/{execution_id}",
-                f"/api/task-logs/{execution_id}",
-            ]
-            logs_data: Any = None
-            used_path = ""
-            for log_path in log_paths:
-                ok, data = self._fetch_api(log_path)
-                if ok:
-                    logs_data = data
-                    used_path = log_path
-                    break
-                # 404 继续试下一个，其他错误也继续
-            if logs_data is not None:
-                if isinstance(logs_data, list):
-                    log_text = "\n".join(
-                        str(entry.get("message") or entry) if isinstance(entry, dict) else str(entry)
-                        for entry in logs_data
-                    )
-                    if log_text:
-                        all_data["exec_api_logs"] = logs_data
-                        if not local_logs:
-                            local_logs = log_text
-                            local_logs_status = f"从执行日志API获取 ({len(local_logs)}字)"
-                        exec_logs_api_status = f"已获取 ({len(logs_data)}条)"
-                    else:
-                        exec_logs_api_status = "返回空列表"
-                elif isinstance(logs_data, dict):
-                    log_entries = logs_data.get("logs") or logs_data.get("log_entries") or logs_data.get("items") or []
-                    if isinstance(log_entries, list) and log_entries:
-                        log_text = "\n".join(
-                            str(e.get("message") or e) if isinstance(e, dict) else str(e)
-                            for e in log_entries
-                        )
-                        if log_text:
-                            all_data["exec_api_logs"] = log_entries
-                            if not local_logs:
-                                local_logs = log_text
-                                local_logs_status = f"从执行日志API获取 ({len(local_logs)}字)"
-                        exec_logs_api_status = f"已获取 ({len(log_entries)}条)"
-                    else:
-                        exec_logs_api_status = "返回无日志"
-                else:
-                    exec_logs_api_status = f"返回格式未知: {type(logs_data).__name__}"
-            else:
-                exec_logs_api_status = f"获取失败（尝试了{len(log_paths)}个路径均未找到）"
-        print(f"[钉钉Bot][平台API] 执行日志API: {exec_logs_api_status}")
+        # 接口3: 从执行详情中提取日志（平台没有独立的执行日志API接口，已通过OpenAPI验证）
+        exec_logs_api_status = "平台无独立执行日志API接口（已验证）"
+        # 从 execution_detail 中提取日志（如果有的话）
+        if execution_detail:
+            exec_api_logs = execution_detail.get("logs") or execution_detail.get("log_entries") or []
+            if isinstance(exec_api_logs, list) and exec_api_logs:
+                log_text = "\n".join(
+                    str(e.get("message") or e) if isinstance(e, dict) else str(e)
+                    for e in exec_api_logs
+                )
+                if log_text:
+                    all_data["exec_api_logs"] = exec_api_logs
+                    if not local_logs:
+                        local_logs = log_text
+                        local_logs_status = f"从执行详情中提取日志 ({len(local_logs)}字)"
+                    exec_logs_api_status = f"从执行详情提取 ({len(exec_api_logs)}条)"
+        print(f"[钉钉Bot][平台API] 执行日志: {exec_logs_api_status}")
 
-        # 接口4: GET /api/tasks - 任务列表（兜底用）
+        # 接口4: GET /api/monitor/overview - 监控总览
+        monitor_overview: dict[str, Any] = {}
+        monitor_overview_status = "此任务不涉及"
+        try:
+            ok, data = self._fetch_api("/api/monitor/overview")
+            if ok:
+                monitor_overview = data if isinstance(data, dict) else {}
+                monitor_overview_status = "已获取"
+                all_data["monitor_overview"] = monitor_overview
+            else:
+                monitor_overview_status = f"获取失败: {data}"
+        except Exception as e:
+            monitor_overview_status = f"异常: {e}"
+        print(f"[钉钉Bot][平台API] 监控总览: {monitor_overview_status}")
+
+        # 接口5: GET /api/monitor/executions - 最近执行列表
+        monitor_executions: list[Any] = []
+        monitor_executions_status = "此任务不涉及"
+        try:
+            ok, data = self._fetch_api("/api/monitor/executions?limit=5")
+            if ok:
+                if isinstance(data, dict):
+                    monitor_executions = data.get("items") or data.get("executions") or []
+                elif isinstance(data, list):
+                    monitor_executions = data
+                monitor_executions_status = f"已获取 ({len(monitor_executions)}条)"
+                all_data["monitor_executions"] = monitor_executions
+            else:
+                monitor_executions_status = f"获取失败: {data}"
+        except Exception as e:
+            monitor_executions_status = f"异常: {e}"
+        print(f"[钉钉Bot][平台API] 最近执行: {monitor_executions_status}")
+
+        # 接口6: GET /api/tasks - 任务列表（兜底用）
         tasks_list_status = "此任务不涉及"
 
-        # 接口5: 从本地文件系统读取任务执行日志
+        # 接口7: GET /api/plugins - 插件列表
+        plugins_list_status = "此任务不涉及"
+
+        # 接口8: 从本地文件系统读取任务执行日志
         local_logs = ""
         local_logs_status = "此任务不涉及"
         if execution_id:
@@ -1979,7 +2055,9 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         lines.append("═" * 15 + " 平台接口获取状态 " + "═" * 15)
         lines.append(f"📋 GET /api/tasks/{task_id}（任务详情）: {task_detail_status}")
         lines.append(f"⚙️  GET /api/tasks/executions/{execution_id}（执行详情）: {execution_detail_status}")
-        lines.append(f"📜 GET /api/tasks/executions/{execution_id}/logs（执行日志）: {exec_logs_api_status}")
+        lines.append(f"📜 执行日志: {exec_logs_api_status}")
+        lines.append(f"📊 GET /api/monitor/overview（监控总览）: {monitor_overview_status}")
+        lines.append(f"📈 GET /api/monitor/executions（最近执行）: {monitor_executions_status}")
         lines.append(f"📋 GET /api/tasks（任务列表）: {tasks_list_status}")
         lines.append(f"📝 本地日志文件读取: {local_logs_status}")
 
