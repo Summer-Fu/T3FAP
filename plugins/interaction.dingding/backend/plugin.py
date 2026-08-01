@@ -193,7 +193,7 @@ def build_command_detail(command_name: str, prefix: str = "/") -> str:
 class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
     plugin_id = "interaction.dingding"
     plugin_name = "钉钉交互机器人"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -222,6 +222,8 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
         print(f"[钉钉交互] set_runtime_config: keys={keys}, 凭据已配置={has_credentials}")
         # 配置变更后尝试重连 Stream
         self._reconnect_stream()
+        # 检测是否需要发送测试消息
+        self._trigger_test_message_if_needed()
 
     def validate_runtime_config(self, config: dict[str, Any]) -> OperationResult:
         normalized = self._normalize_runtime_config(config)
@@ -565,6 +567,133 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
             import traceback
             traceback.print_exc()
             return False
+
+    # ==================== 钉钉 API 主动发消息 ====================
+
+    def _get_dingtalk_access_token(self) -> str | None:
+        """获取钉钉企业内部应用 access_token。"""
+        config = self._resolve_config()
+        app_key = str(config.get("app_key") or "").strip()
+        app_secret = str(config.get("app_secret") or "").strip()
+        if not app_key or not app_secret:
+            print(f"[钉钉交互] 获取 access_token 失败：缺少 AppKey/AppSecret")
+            return None
+        try:
+            url = f"https://oapi.dingtalk.com/gettoken?appkey={app_key}&appsecret={app_secret}"
+            with httpx.Client(timeout=5) as client:
+                resp = client.get(url)
+                data = resp.json()
+                if data.get("errcode") == 0:
+                    token = data.get("access_token")
+                    print(f"[钉钉交互] access_token 获取成功")
+                    return token
+                else:
+                    print(f"[钉钉交互] access_token 获取失败: {data}")
+                    return None
+        except Exception as exc:
+            print(f"[钉钉交互] 获取 access_token 异常: {exc}")
+            return None
+
+    def _get_userid_by_mobile(self, access_token: str, mobile: str) -> str | None:
+        """通过手机号获取钉钉用户 userId。"""
+        try:
+            url = "https://oapi.dingtalk.com/topapi/v2/user/getbymobile"
+            with httpx.Client(timeout=5) as client:
+                resp = client.post(url, params={"access_token": access_token}, json={"mobile": mobile})
+                data = resp.json()
+                if data.get("errcode") == 0:
+                    userid = data.get("result", {}).get("userid")
+                    print(f"[钉钉交互] 手机号 {mobile[:3]}****{mobile[-4:]} 对应 userId: {userid}")
+                    return userid
+                else:
+                    print(f"[钉钉交互] 手机号查 userId 失败: {data}")
+                    return None
+        except Exception as exc:
+            print(f"[钉钉交互] 手机号查 userId 异常: {exc}")
+            return None
+
+    def _send_oto_test_message(self, userid: str) -> bool:
+        """向指定 userId 发送单聊测试消息。"""
+        config = self._resolve_config()
+        access_token = self._get_dingtalk_access_token()
+        if not access_token:
+            return False
+        robot_code = str(config.get("robot_code") or "").strip() or str(config.get("app_key") or "").strip()
+        try:
+            test_text = (
+                "🎉 **T3 影视助手 - 连通性测试**\n"
+                "─────────────────────\n"
+                "✅ 机器人配置正确\n"
+                "✅ API 通讯正常\n"
+                "✅ 单聊消息推送成功\n"
+                "─────────────────────\n"
+                f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                "现在可以回到群里 @机器人 输入「帮助」开始使用！"
+            )
+            msg_param = json.dumps({"content": test_text}, ensure_ascii=False)
+            url = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
+            headers = {
+                "x-acs-dingtalk-access-token": access_token,
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "robotCode": robot_code,
+                "userIds": [userid],
+                "msgKey": "sampleText",
+                "msgParam": msg_param,
+            }
+            with httpx.Client(timeout=8) as client:
+                resp = client.post(url, headers=headers, json=payload)
+                if resp.status_code == 200:
+                    print(f"[钉钉交互] 单聊测试消息发送成功！")
+                    return True
+                else:
+                    print(f"[钉钉交互] 单聊测试消息发送失败: HTTP {resp.status_code} - {resp.text}")
+                    return False
+        except Exception as exc:
+            print(f"[钉钉交互] 单聊测试消息发送异常: {exc}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _trigger_test_message_if_needed(self) -> None:
+        """检测配置中的 send_test_message 开关，如开启则发送测试消息并自动关闭。"""
+        config = self._resolve_config()
+        should_send = bool(config.get("send_test_message"))
+        mobile = str(config.get("test_receiver_mobile") or "").strip()
+
+        if not should_send:
+            return
+
+        print(f"[钉钉交互] 检测到「发送测试消息」开关已开启，准备发送测试消息...")
+
+        if not mobile:
+            print(f"[钉钉交互] 发送测试消息失败：请先填写「测试消息接收人手机号」")
+            return
+
+        # 异步执行，不阻塞保存流程
+        def _do_send():
+            # 先重置开关，避免重复发送
+            self._runtime_config["send_test_message"] = False
+            access_token = self._get_dingtalk_access_token()
+            if not access_token:
+                return
+            userid = self._get_userid_by_mobile(access_token, mobile)
+            if not userid:
+                print(f"[钉钉交互] 发送测试消息失败：未找到手机号 {mobile[:3]}****{mobile[-4:]} 对应用户")
+                return
+            ok = self._send_oto_test_message(userid)
+            if ok:
+                print("")
+                print("╔══════════════════════════════════════════════════════════════╗")
+                print("║  ✅  测试消息已通过钉钉机器人成功发送！                        ║")
+                print("║  请检查钉钉单聊消息，确认收到后即可正常使用。                  ║")
+                print("╚══════════════════════════════════════════════════════════════╝")
+                print("")
+
+        import threading
+        t = threading.Thread(target=_do_send, daemon=True, name="dingtalk-test-msg")
+        t.start()
 
     # ==================== 命令处理 ====================
 
