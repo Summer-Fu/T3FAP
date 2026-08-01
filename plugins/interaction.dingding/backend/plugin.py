@@ -230,6 +230,8 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
         self._reconnect_stream()
         # 检测是否需要发送测试消息
         self._trigger_test_message_if_needed()
+        # 检测是否需要重启 Stream 连接（调试用）
+        self._trigger_stream_test_if_needed()
 
     def validate_runtime_config(self, config: dict[str, Any]) -> OperationResult:
         normalized = self._normalize_runtime_config(config)
@@ -451,16 +453,22 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
         app_key = str(config.get("app_key") or "").strip()
         app_secret = str(config.get("app_secret") or "").strip()
 
+        print(f"[钉钉交互][Stream] 开始启动流程，AppKey 已配置: {bool(app_key)}, AppSecret 已配置: {bool(app_secret)}")
+
         if not app_key or not app_secret:
-            print(f"[钉钉交互] Stream 未启动：缺少 AppKey/AppSecret 配置")
+            print(f"[钉钉交互][Stream] ❌ 未启动：缺少 AppKey/AppSecret 配置")
             return False
 
         if self._stream_connected and self._stream_client is not None:
+            print(f"[钉钉交互][Stream] 已连接，跳过重复启动")
             return True
 
         # 确保 SDK 可用
+        print(f"[钉钉交互][Stream] 检查 dingtalk-stream SDK...")
         if not self._ensure_dingtalk_sdk():
+            print(f"[钉钉交互][Stream] ❌ SDK 不可用，启动失败")
             return False
+        print(f"[钉钉交互][Stream] ✅ SDK 可用")
 
         try:
             import dingtalk_stream
@@ -472,6 +480,20 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
                 """T3 影视助手的消息处理器。"""
 
                 async def process(self, callback: dingtalk_stream.CallbackMessage):
+                    # 第 0 步：打印原始消息（确保我们能看到任何收到的内容）
+                    print("")
+                    print("╔══════════════════════════════════════════════════════════════╗")
+                    print("║  📨  Stream 收到原始消息！                                    ║")
+                    print("╠══════════════════════════════════════════════════════════════╣")
+                    try:
+                        raw_data = str(callback.data)[:500]
+                        print(f"║  topic: {callback.topic}")
+                        print(f"║  原始数据前500字符: {raw_data}")
+                    except Exception as e:
+                        print(f"║  读取原始数据失败: {e}")
+                    print("╚══════════════════════════════════════════════════════════════╝")
+                    print("")
+
                     try:
                         incoming = dingtalk_stream.ChatbotMessage.from_dict(callback.data)
                         text_content = incoming.text.content if incoming.text else ""
@@ -479,7 +501,8 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
                         chat_type = incoming.chat_type or "unknown"
                         conversation_id = incoming.conversation_id or ""
 
-                        print(f"[钉钉交互] 收到消息: sender={sender_nick}, type={chat_type}, content={text_content[:100]}")
+                        print(f"[钉钉交互][Stream][消息解析] sender={sender_nick}, type={chat_type}, conv={conversation_id[:20]}...")
+                        print(f"[钉钉交互][Stream][消息解析] 内容: {text_content[:200]}")
 
                         # 首次收到消息时，发送欢迎/验证消息
                         is_first_message = not plugin_ref._first_welcome_sent
@@ -494,10 +517,14 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
                                 "✅ 配置正确，通讯正常！\n\n"
                                 "输入「帮助」查看所有可用命令。"
                             )
+                            print(f"[钉钉交互][Stream] 首次消息，准备发送欢迎消息...")
                             try:
                                 self.reply_text(welcome_msg, incoming)
+                                print(f"[钉钉交互][Stream] ✅ 欢迎消息已发送（通过 reply_text）")
                             except Exception as reply_exc:
-                                print(f"[钉钉交互] 发送欢迎消息失败: {reply_exc}")
+                                print(f"[钉钉交互][Stream] ❌ 欢迎消息发送失败: {reply_exc}")
+                                import traceback
+                                traceback.print_exc()
                             print("")
                             print("╔══════════════════════════════════════════════════════════════╗")
                             print("║  ✅  钉钉交互机器人首次通讯成功！已发送欢迎/验证消息          ║")
@@ -505,28 +532,54 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
                             print("")
                         else:
                             # 解析并执行命令
+                            print(f"[钉钉交互][Stream] 处理用户命令: {text_content[:100]}")
                             reply_text = plugin_ref._process_user_command(text_content, sender_nick)
+                            print(f"[钉钉交互][Stream] 命令回复内容生成完毕，长度: {len(reply_text)}")
                             try:
                                 self.reply_text(reply_text, incoming)
+                                print(f"[钉钉交互][Stream] ✅ 命令回复已发送")
                             except Exception as reply_exc:
-                                print(f"[钉钉交互] 回复消息失败: {reply_exc}")
+                                print(f"[钉钉交互][Stream] ❌ 命令回复发送失败: {reply_exc}")
+                                import traceback
+                                traceback.print_exc()
 
                     except Exception as exc:
-                        print(f"[钉钉交互] 处理消息异常: {exc}")
+                        print(f"[钉钉交互][Stream] ❌ 处理消息异常: {exc}")
                         import traceback
                         traceback.print_exc()
 
                     return dingtalk_stream.AckMessage.STATUS_OK, "OK"
 
             # 创建凭据和客户端
+            print(f"[钉钉交互][Stream] 创建 Credential (client_id={app_key[:6]}...)")
             credential = dingtalk_stream.Credential(app_key, app_secret)
+            print(f"[钉钉交互][Stream] 创建 DingTalkStreamClient...")
             client = dingtalk_stream.DingTalkStreamClient(credential)
 
             # 注册机器人消息处理器（topic 固定值）
-            client.register_callback_handler(
-                dingtalk_stream.chatbot.ChatbotMessage.TOPIC,
-                T3ChatbotHandler(),
-            )
+            topic = dingtalk_stream.chatbot.ChatbotMessage.TOPIC
+            print(f"[钉钉交互][Stream] 注册回调处理器, topic={topic}")
+            handler = T3ChatbotHandler()
+            client.register_callback_handler(topic, handler)
+            print(f"[钉钉交互][Stream] ✅ 回调处理器注册成功")
+
+            # 额外注册所有已知 topic 的调试处理器（确保不漏掉任何消息）
+            try:
+                all_topics = [
+                    "/v1.0/im/bot/messages/get",
+                    "/v1.0/im/bot/messages/read",
+                    "/v1.0/im/bot/actions/callback",
+                ]
+                for extra_topic in all_topics:
+                    if extra_topic != topic:
+                        class DebugHandler(dingtalk_stream.ChatbotHandler):
+                            async def process(self, callback, _topic=extra_topic):
+                                print(f"[钉钉交互][Stream][调试] 收到额外 topic[{_topic}] 的消息: {str(callback.data)[:300]}")
+                                return dingtalk_stream.AckMessage.STATUS_OK, "OK"
+                        client.register_callback_handler(extra_topic, DebugHandler())
+                        print(f"[钉钉交互][Stream] 额外调试处理器已注册: {extra_topic}")
+            except Exception as exc:
+                print(f"[钉钉交互][Stream] 注册调试处理器时出错（不影响主流程）: {exc}")
 
             self._stream_client = client
 
@@ -536,10 +589,13 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
                 try:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
-                    print(f"[钉钉交互] Stream 连接线程已启动 (AppKey={app_key[:6]}...)")
+                    print(f"[钉钉交互][Stream] 连接线程已启动，准备建立 WebSocket 连接...")
+                    print(f"[钉钉交互][Stream] 调用 client.start()...（这一步会建立连接）")
                     loop.run_until_complete(client.start())
                 except Exception as exc:
-                    print(f"[钉钉交互] Stream 连接异常（将自动重连）: {exc}")
+                    print(f"[钉钉交互][Stream] ❌ 连接异常（将自动重连）: {exc}")
+                    import traceback
+                    traceback.print_exc()
                 finally:
                     if loop:
                         try:
@@ -547,20 +603,22 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
                         except Exception:
                             pass
                     plugin_ref._stream_connected = False
-                    print(f"[钉钉交互] Stream 连接已断开")
+                    print(f"[钉钉交互][Stream] 连接已断开")
 
             stream_thread = threading.Thread(target=_run_stream, daemon=True, name="dingtalk-stream")
             stream_thread.start()
             self._stream_connected = True
             print("")
             print("╔══════════════════════════════════════════════════════════════╗")
-            print("║  ✅  钉钉交互机器人 Stream 模式连接成功！                     ║")
+            print("║  ✅  钉钉交互机器人 Stream 模式连接线程已启动！                 ║")
             print("╠══════════════════════════════════════════════════════════════╣")
             print(f"║  AppKey:  {app_key[:8]}...{app_key[-4:]}")
-            print(f"║  Topic:   {dingtalk_stream.chatbot.ChatbotMessage.TOPIC}")
+            print(f"║  Topic:   {topic}")
             print("║                                                              ║")
-            print("║  请在钉钉群中 @机器人 输入「帮助」测试通讯是否正常。         ║")
-            print("║  如无回复，请查看平台日志中 [钉钉交互] 开头的日志。          ║")
+            print("║  📡 正在建立 WebSocket 连接，请稍候...（约 3-10 秒）         ║")
+            print("║                                                              ║")
+            print("║  连接成功后请在钉钉中 @机器人 或 单聊发送消息测试。          ║")
+            print("║  如 60 秒后仍无任何反应，请查看日志中 [Stream] 开头的行。   ║")
             print("╚══════════════════════════════════════════════════════════════╝")
             print("")
             return True
@@ -720,6 +778,81 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
 
         import threading
         t = threading.Thread(target=_do_send, daemon=True, name="dingtalk-test-msg")
+        t.start()
+
+    def _trigger_stream_test_if_needed(self) -> None:
+        """检测配置中的 test_stream 开关，如开启则强制重启 Stream 连接并输出详细日志。"""
+        config = self._resolve_config()
+        raw_switch = config.get("test_stream")
+        should_test = False
+        if isinstance(raw_switch, bool):
+            should_test = raw_switch
+        elif isinstance(raw_switch, str):
+            should_test = raw_switch.lower() in ("true", "1", "yes", "on")
+
+        print(f"[钉钉交互][Stream测试] test_stream = {repr(raw_switch)} (type={type(raw_switch).__name__}), should_test={should_test}")
+
+        if not should_test:
+            print(f"[钉钉交互][Stream测试] 开关未开启，跳过。")
+            return
+
+        print("")
+        print("╔══════════════════════════════════════════════════════════════╗")
+        print("║  🔧  检测到 Stream 连接测试开关已开启！                        ║")
+        print("║      将强制断开并重连，输出极其详细的连接日志。                ║")
+        print("╚══════════════════════════════════════════════════════════════╝")
+        print("")
+
+        # 先重置开关
+        self._runtime_config["test_stream"] = False
+
+        # 强制重启连接
+        import threading
+
+        def _do_restart():
+            print(f"[钉钉交互][Stream测试] 步骤1/3: 断开现有连接...")
+            try:
+                if self._stream_client:
+                    print(f"[钉钉交互][Stream测试] 正在调用 client.stop()...")
+                    try:
+                        self._stream_client.stop()
+                    except Exception as e:
+                        print(f"[钉钉交互][Stream测试] client.stop() 异常（可忽略）: {e}")
+                self._stream_client = None
+                self._stream_connected = False
+                print(f"[钉钉交互][Stream测试] ✅ 连接已断开")
+            except Exception as e:
+                print(f"[钉钉交互][Stream测试] 断开连接时出错: {e}")
+
+            import time
+            print(f"[钉钉交互][Stream测试] 步骤2/3: 等待 2 秒...")
+            time.sleep(2)
+
+            print(f"[钉钉交互][Stream测试] 步骤3/3: 重新建立 Stream 连接...")
+            self._start_stream_if_needed()
+
+            # 持续输出连接状态 30 秒
+            print(f"[钉钉交互][Stream测试] 接下来 30 秒将持续监控连接状态...")
+            for i in range(30):
+                time.sleep(1)
+                status = "已连接" if self._stream_connected else "连接中"
+                client_ok = "✅" if self._stream_client else "❌"
+                print(f"[钉钉交互][Stream测试] 监控 {i+1}/30: stream_connected={self._stream_connected} ({status}), client={client_ok}")
+
+            print("")
+            print("╔══════════════════════════════════════════════════════════════╗")
+            print("║  🔧  Stream 连接测试监控结束。                                  ║")
+            print(f"║  最终状态: stream_connected={self._stream_connected}, client={'✅' if self._stream_client else '❌'}  ║")
+            print("║                                                              ║")
+            print("║  诊断提示：                                                    ║")
+            print("║  1. 如看到 [Stream] 连接线程已启动 → 代码已执行                ║")
+            print("║  2. 如看到 [Stream] 注册回调处理器成功 → handler 已注册       ║")
+            print("║  3. 如 60 秒内无任何错误 → WebSocket 连接大概率已建立         ║")
+            print("║  4. 此时 @机器人 发消息，应看到 [Stream] 收到原始消息！       ║")
+            print("╚══════════════════════════════════════════════════════════════╝")
+            print("")
+
+        t = threading.Thread(target=_do_restart, daemon=True, name="dingtalk-stream-test")
         t.start()
 
     # ==================== 命令处理 ====================
