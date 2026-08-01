@@ -1,7 +1,7 @@
 {
   "id": "automation.dingding_bot",
   "name": "钉钉 Bot",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "category": "automation",
   "description": "监听任务和系统事件，通过钉钉群机器人发送通知消息。支持加签安全设置、@指定人。",
   "author": "T3FAP Community",
@@ -102,6 +102,36 @@
       "description": "API 认证使用的 HTTP Header 名称，默认 X-API-Key（T3MT 平台标准）。",
       "secret": false,
       "group": "高级设置"
+    },
+    {
+      "key": "show_api_status",
+      "label": "推送平台接口状态",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "是否在推送中显示平台接口获取状态（API配置、各接口调用结果等）。关闭可让消息更简洁。",
+      "secret": false,
+      "group": "通知内容"
+    },
+    {
+      "key": "show_task_logs",
+      "label": "推送任务执行日志",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "是否在推送中显示任务执行滚动日志（本地日志文件 + API提取的日志）。关闭可让消息更简洁。",
+      "secret": false,
+      "group": "通知内容"
+    },
+    {
+      "key": "show_debug_info",
+      "label": "推送调试信息",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "是否在推送中显示调试数据（event/payload/output_payload 全量字段、任务详情keys等）。主要用于排查问题，日常建议关闭。",
+      "secret": false,
+      "group": "通知内容"
     }
   ],
   "ui": {

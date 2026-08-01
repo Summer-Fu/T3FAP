@@ -413,7 +413,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.3.0"
+    plugin_version = "2.4.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -2006,7 +2006,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         ):
             is_no_update = True
 
-        # ==================== 按新精简美观模板构建消息 ====================
+        # ==================== 按移动端友好简洁模板构建消息 ====================
 
         # 触发类型转中文
         trigger_cn = TRIGGER_SOURCE_CN.get(trigger_source, trigger_source or "未知")
@@ -2031,76 +2031,74 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         else:
             status_display = "完成"
 
+        # 获取通知内容显示配置
+        _cfg = self._resolve_config()
+        show_api = bool(_cfg.get("show_api_status"))
+        show_logs = bool(_cfg.get("show_task_logs"))
+        show_debug = bool(_cfg.get("show_debug_info"))
+
         lines: list[str] = []
 
         if is_started:
-            # ===== 任务开始模板 =====
-            lines.append(f"▶️ {task_name} - {type_display} 开始执行")
-            lines.append("━" * 40)
-            start_parts = []
-            if task_id:
-                start_parts.append(f"🆔 {task_id}")
-            start_parts.append(f"🏷️ {type_display}")
-            lines.append("     ".join(start_parts))
-            start_parts2 = []
-            start_parts2.append(f"⚡ {trigger_cn}")
+            # ===== 任务开始模板（极简） =====
+            lines.append(f"▶️ {task_name} · 开始执行")
+            lines.append(f"  🏷️ {type_display}   ⚡ {trigger_cn}")
             if target_dir:
-                start_parts2.append(f"📂 {target_dir}")
-            lines.append("     ".join(start_parts2))
+                lines.append(f"  📂 {target_dir}")
         else:
-            # ===== 任务完成/失败模板（精简美观版） =====
-            lines.append(f"📌 {task_name}")
-            lines.append("┏" + "━" * 42 + "┓")
+            # ===== 任务完成/失败模板（移动端友好） =====
+            # 标题行
+            title_emoji = "❌" if is_failed else ("🔄" if is_no_update else "✅")
+            lines.append(f"{title_emoji} {task_name}")
+            lines.append(f"  {status_display} · {type_display} · {trigger_cn}")
 
-            # 第一行：ID + 耗时
-            row1 = []
+            # 关键信息（紧凑一行）
+            meta = []
             if task_id:
-                row1.append(f"🆔 任务ID：{task_id}")
+                meta.append(f"🆔{task_id}")
             if duration_text:
-                row1.append(f"⏱️ 耗时：{duration_text}")
-            if row1:
-                lines.append(f"┃  {'     '.join(row1)}")
+                meta.append(f"⏱️{duration_text}")
+            if meta:
+                lines[-1] = lines[-1] + " · " + " ".join(meta)
 
-            # 第二行：类型 + 触发
-            row2 = [f"🏷️ 类型：{type_display}", f"⚡ 触发：{trigger_cn}"]
-            lines.append(f"┃  {'     '.join(row2)}")
+            # 分隔
+            lines.append("")
 
-            # 第三行：状态 + 目标
-            row3 = [f"📊 状态：{status_display}"]
-            if target_dir:
-                # 目标路径太长时截断
-                tgt_display = target_dir if len(target_dir) <= 18 else target_dir[:15] + "…"
-                row3.append(f"📂 目标：{tgt_display}")
-            lines.append(f"┃  {'     '.join(row3)}")
-            lines.append("┗" + "━" * 42 + "┛")
+            # ===== 成功/跳过/失败 明细（简洁） =====
+            has_detail = False
 
-            # ===== 成功/跳过/失败 明细 =====
             # 成功
             if saved_files and (saved_count is None or saved_count > 0):
                 display = _format_file_list(saved_files)
                 lines.append(f"✅ 成功 {len(saved_files)} 项")
-                lines.append(f"   └─ {display}")
+                lines.append(f"   {display}")
+                has_detail = True
             elif saved_count is not None and saved_count > 0:
                 verb = "生成" if "strm" in (plugin_id or "") else "转存"
                 lines.append(f"✅ {verb} {saved_count} 项")
+                has_detail = True
 
             # 跳过
             if skipped_files:
                 display = _format_file_list(skipped_files)
                 skip_note = "（已存在）" if saved_count is not None and saved_count == 0 else ""
                 lines.append(f"⏭️ 跳过 {len(skipped_files)} 项{skip_note}")
-                lines.append(f"   └─ {display}")
+                lines.append(f"   {display}")
+                has_detail = True
             elif skipped_count is not None and skipped_count > 0 and not skipped_files:
                 skip_note = "（本地已存在）" if saved_count is not None and saved_count == 0 else ""
                 lines.append(f"⏭️ 跳过 {skipped_count} 项{skip_note}")
+                has_detail = True
 
             # 失败
             if failed_files:
                 display = _format_file_list(failed_files)
                 lines.append(f"❌ 失败 {len(failed_files)} 项")
-                lines.append(f"   └─ {display}")
+                lines.append(f"   {display}")
+                has_detail = True
             elif failed_count is not None and failed_count > 0:
                 lines.append(f"❌ 失败 {failed_count} 项")
+                has_detail = True
 
             # ===== 最新剧集 & 更新时间 =====
             episode_display_parts = []
@@ -2115,19 +2113,29 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                     if f not in episode_display_parts:
                         episode_display_parts.append(f)
 
-            if episode_display_parts:
-                # 只显示前2个
+            if episode_display_parts or latest_episode_update_time:
+                if has_detail:
+                    lines.append("")
                 shown = episode_display_parts[:2]
-                lines.append(f"🆕 最新：{'、'.join(shown)}")
+                ep_text = f"🆕 {'、'.join(shown)}" if shown else ""
+                time_text = f"🕐 {latest_episode_update_time}" if latest_episode_update_time else ""
+                if ep_text and time_text:
+                    lines.append(f"{ep_text}  {time_text}")
+                elif ep_text:
+                    lines.append(ep_text)
+                elif time_text:
+                    lines.append(time_text)
+                has_detail = True
 
-            if latest_episode_update_time:
-                lines.append(f"🕐 更新：{latest_episode_update_time}")
+            # 目标路径
+            if target_dir:
+                lines.append(f"📂 {target_dir}")
 
             # ===== 其他说明 =====
             if is_no_update:
                 lines.append("")
                 lines.append("🔄 本次无更新（已存在相同文件）")
-            elif error_text and event_type != "task.failed":
+            elif error_text and event_type != "task.failed" and not is_failed:
                 lines.append("")
                 lines.append(f"⚠️ {error_text}")
             elif detail_message and not is_failed:
@@ -2138,95 +2146,66 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 lines.append("")
                 lines.append(f"⚠️ 错误：{error_text}")
 
-        # ==================== 平台接口获取状态区 ====================
-        lines.append("")
-        lines.append("═" * 15 + " 平台接口获取状态 " + "═" * 15)
-        # 显示当前实际使用的API配置（方便排查401问题）
-        __api_base_used = self._api_base or "未探测"
-        __api_cfg = self._resolve_config()
-        __cfg_base = str(__api_cfg.get("t3_api_base") or "")
-        __cfg_key = str(__api_cfg.get("t3_api_key") or "")
-        __cfg_header = str(__api_cfg.get("t3_api_header") or "")
-        __all_cfg_keys = sorted(list(__api_cfg.keys()))
-        __key_mask = __cfg_key[:8] + "***" + __cfg_key[-4:] if len(__cfg_key) > 12 else ("已设置" if __cfg_key else "未设置")
-        lines.append(f"🔧 API配置: 地址={__cfg_base or '未设置'}, Key={__key_mask}, Header={__cfg_header or 'X-API-Key(默认)'}")
-        lines.append(f"📍 API实际调用地址: {__api_base_used}")
-        lines.append(f"🔑 插件设置所有配置项: {', '.join(__all_cfg_keys)}")
-        lines.append(f"📋 GET /api/tasks/{task_id}（任务详情）: {task_detail_status}")
-        lines.append(f"⚙️  GET /api/tasks/executions/{execution_id}（执行详情）: {execution_detail_status}")
-        lines.append(f"📜 执行日志: {exec_logs_api_status}")
-        lines.append(f"📊 GET /api/monitor/overview（监控总览）: {monitor_overview_status}")
-        lines.append(f"📈 GET /api/monitor/executions（最近执行）: {monitor_executions_status}")
-        lines.append(f"📋 GET /api/tasks（任务列表）: {tasks_list_status}")
-        lines.append(f"📝 本地日志文件读取: {local_logs_status}")
-
-        # ==================== 任务执行滚动日志 ====================
-        if local_logs:
+        # ==================== 平台接口获取状态区（可配置，默认关闭） ====================
+        if show_api:
             lines.append("")
-            lines.append("═" * 18 + " 任务执行日志 " + "═" * 18)
-            # 最多展示 50 行，超出截断
+            lines.append("─" * 10 + " 平台接口 " + "─" * 10)
+            # 显示当前实际使用的API配置（方便排查401问题）
+            __api_base_used = self._api_base or "未探测"
+            __api_cfg = self._resolve_config()
+            __cfg_base = str(__api_cfg.get("t3_api_base") or "")
+            __cfg_key = str(__api_cfg.get("t3_api_key") or "")
+            __cfg_header = str(__api_cfg.get("t3_api_header") or "")
+            __all_cfg_keys = sorted(list(__api_cfg.keys()))
+            __key_mask = __cfg_key[:8] + "***" + __cfg_key[-4:] if len(__cfg_key) > 12 else ("已设置" if __cfg_key else "未设置")
+            lines.append(f"🔧 API: {__cfg_base or '未设置'}")
+            lines.append(f"📍 实际: {__api_base_used}")
+            lines.append(f"📋 任务: {task_detail_status}")
+            lines.append(f"⚙️  执行: {execution_detail_status}")
+            lines.append(f"📜 日志: {exec_logs_api_status}")
+            lines.append(f"📊 监控: {monitor_overview_status}")
+            lines.append(f"📈 列表: {monitor_executions_status}")
+
+        # ==================== 任务执行滚动日志（可配置，默认关闭） ====================
+        if show_logs and local_logs:
+            lines.append("")
+            lines.append("─" * 10 + " 任务日志 " + "─" * 10)
             log_lines = local_logs.strip().split("\n")
-            if len(log_lines) > 50:
-                shown = log_lines[-50:]
+            if len(log_lines) > 30:
+                shown = log_lines[-30:]
                 lines.extend(shown)
-                lines.append(f"…（已截断，共{len(log_lines)}行）")
+                lines.append(f"…（共{len(log_lines)}行）")
             else:
                 lines.extend(log_lines)
 
-        # ==================== 调试数据区（全量字段） ====================
-        # 把 event 中所有能拿到的数据都列出来，方便排查
-        lines.append("")
-        lines.append("═" * 20 + " 调试数据 " + "═" * 20)
-
-        def _safe_json(obj: Any, max_len: int = 3000) -> str:
-            """安全地 JSON 序列化，截断过长内容。"""
-            try:
-                text = json.dumps(obj, ensure_ascii=False, default=str)
-                if len(text) > max_len:
-                    return text[:max_len] + f"…（已截断，共{len(text)}字）"
-                return text
-            except Exception as e:
-                return f"<序列化失败: {e}>"
-
-        # 列出所有顶层 keys
-        lines.append(f"🔝 event 顶层字段: {list(event.keys())}")
-        lines.append(f"📦 payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'N/A'}")
-        lines.append(f"📤 output_payload keys: {list(output_payload.keys()) if isinstance(output_payload, dict) else 'N/A'}")
-        lines.append(f"📥 input_payload keys: {list(input_payload.keys()) if isinstance(input_payload, dict) else 'N/A'}")
-        if task_detail:
-            lines.append(f"📋 任务详情 keys: {list(task_detail.keys()) if isinstance(task_detail, dict) else 'N/A'}")
-        if execution_detail:
-            lines.append(f"⚙️  执行详情 keys: {list(execution_detail.keys()) if isinstance(execution_detail, dict) else 'N/A'}")
-
-        # output_payload 全量内容（最可能包含文件列表）
-        if output_payload:
+        # ==================== 调试数据区（可配置，默认关闭） ====================
+        if show_debug:
             lines.append("")
-            lines.append("📤 output_payload 全量:")
-            lines.append(_safe_json(output_payload, 4000))
+            lines.append("─" * 10 + " 调试数据 " + "─" * 10)
 
-        # payload 全量
-        if payload and payload != output_payload:
-            lines.append("")
-            lines.append("📦 payload 全量:")
-            lines.append(_safe_json(payload, 2000))
+            def _safe_json(obj: Any, max_len: int = 3000) -> str:
+                """安全地 JSON 序列化，截断过长内容。"""
+                try:
+                    text = json.dumps(obj, ensure_ascii=False, default=str)
+                    if len(text) > max_len:
+                        return text[:max_len] + f"…（共{len(text)}字）"
+                    return text
+                except Exception as e:
+                    return f"<序列化失败: {e}>"
 
-        # 任务详情
-        if task_detail:
-            lines.append("")
-            lines.append("📋 任务详情全量:")
-            lines.append(_safe_json(task_detail, 3000))
+            # 列出所有顶层 keys
+            lines.append(f"event: {list(event.keys())}")
+            lines.append(f"payload: {list(payload.keys()) if isinstance(payload, dict) else 'N/A'}")
+            if task_detail:
+                lines.append(f"task_detail: {list(task_detail.keys()) if isinstance(task_detail, dict) else 'N/A'}")
+            if execution_detail:
+                lines.append(f"exec_detail: {list(execution_detail.keys()) if isinstance(execution_detail, dict) else 'N/A'}")
 
-        # 执行详情
-        if execution_detail:
-            lines.append("")
-            lines.append("⚙️  执行详情全量:")
-            lines.append(_safe_json(execution_detail, 3000))
-
-        # event 全量（去掉已展示的 payload 避免重复）
-        event_for_debug = {k: v for k, v in event.items() if k != "payload"}
-        lines.append("")
-        lines.append("🔝 event（不含payload）全量:")
-        lines.append(_safe_json(event_for_debug, 3000))
+            # payload 全量
+            if payload:
+                lines.append("")
+                lines.append("📦 payload:")
+                lines.append(_safe_json(payload, 2000))
 
         # ==================== 标题构建（task_id + 任务名） ====================
         category = self._category_for(event_type)
