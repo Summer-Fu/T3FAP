@@ -1,7 +1,7 @@
 {
   "id": "interaction.dingding",
   "name": "钉钉交互机器人",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "category": "assistant",
   "description": "通过钉钉群机器人进行交互式操作，支持资源搜索、任务创建、任务状态查询等。@机器人输入「帮助」查看所有可用命令。",
   "author": "T3FAP Community",

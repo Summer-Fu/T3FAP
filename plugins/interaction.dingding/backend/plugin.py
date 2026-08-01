@@ -193,13 +193,14 @@ def build_command_detail(command_name: str, prefix: str = "/") -> str:
 class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
     plugin_id = "interaction.dingding"
     plugin_name = "钉钉交互机器人"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
         self._api_base: str | None = None
         self._stream_client = None
         self._stream_connected = False
+        self._stream_stop_event = None
 
     # ==================== 配置管理 ====================
 
@@ -387,14 +388,53 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
 
     # ==================== Stream 模式连接 ====================
 
+    def _ensure_dingtalk_sdk(self) -> bool:
+        """确保 dingtalk-stream SDK 已安装，未安装则尝试自动安装。"""
+        try:
+            import dingtalk_stream  # noqa: F401
+            return True
+        except ImportError:
+            pass
+
+        print(f"[钉钉交互] dingtalk-stream SDK 未找到，尝试自动安装...")
+        try:
+            import subprocess
+            import sys
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "dingtalk-stream", "-q"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                print(f"[钉钉交互] dingtalk-stream SDK 自动安装成功")
+                return True
+            else:
+                print(f"[钉钉交互] dingtalk-stream SDK 自动安装失败: {result.stderr}")
+        except Exception as exc:
+            print(f"[钉钉交互] 自动安装 dingtalk-stream 异常: {exc}")
+
+        print(f"[钉钉交互] 请手动安装: pip install dingtalk-stream")
+        return False
+
     def _reconnect_stream(self) -> None:
         """配置变更后重连 Stream。"""
-        # 这里只做标记，真正的连接由平台生命周期管理
         self._stream_connected = False
-        print(f"[钉钉交互] Stream 连接已重置，等待平台启动连接...")
+        self._stream_stop_event = None
+        if self._stream_client is not None:
+            try:
+                self._stream_client.stop()
+            except Exception:
+                pass
+            self._stream_client = None
+        print(f"[钉钉交互] Stream 连接已重置，尝试重新连接...")
+        self._start_stream_if_needed()
 
     def _start_stream_if_needed(self) -> bool:
         """启动钉钉 Stream 连接（如果已配置凭据）。"""
+        import asyncio
+        import threading
+
         config = self._resolve_config()
         app_key = str(config.get("app_key") or "").strip()
         app_secret = str(config.get("app_secret") or "").strip()
@@ -406,32 +446,82 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
         if self._stream_connected and self._stream_client is not None:
             return True
 
+        # 确保 SDK 可用
+        if not self._ensure_dingtalk_sdk():
+            return False
+
         try:
-            # 尝试使用 dingtalk-stream SDK
-            from dingtalk_stream import AckMessage, CallbackType, DingTalkStreamClient, InteractiveCardsIncomingMessage, ChatbotMessage
+            import dingtalk_stream
 
-            def on_chatbot_message(message: ChatbotMessage) -> AckMessage:
-                """处理机器人消息。"""
-                try:
-                    return self._handle_chatbot_message(message)
-                except Exception as exc:
-                    print(f"[钉钉交互] 处理消息异常: {exc}")
-                    import traceback
-                    traceback.print_exc()
-                    return AckMessage.STATUS_OK, "OK"
+            # 插件自身引用，供 handler 内部使用
+            plugin_ref = self
 
-            client = DingTalkStreamClient(app_key, app_secret)
-            robot_code = str(config.get("robot_code") or "").strip()
-            if robot_code:
-                client.register_chatbot_message_handler(robot_code, on_chatbot_message)
-            else:
-                client.register_all_chatbot_message_handler(on_chatbot_message)
+            class T3ChatbotHandler(dingtalk_stream.ChatbotHandler):
+                """T3 影视助手的消息处理器。"""
+
+                async def process(self, callback: dingtalk_stream.CallbackMessage):
+                    try:
+                        incoming = dingtalk_stream.ChatbotMessage.from_dict(callback.data)
+                        text_content = incoming.text.content if incoming.text else ""
+                        sender_nick = incoming.sender_nick or ""
+                        chat_type = incoming.chat_type or "unknown"
+                        conversation_id = incoming.conversation_id or ""
+
+                        print(f"[钉钉交互] 收到消息: sender={sender_nick}, type={chat_type}, content={text_content[:100]}")
+
+                        # 解析并执行命令
+                        reply_text = plugin_ref._process_user_command(text_content, sender_nick)
+
+                        # 回复消息
+                        try:
+                            self.reply_text(reply_text, incoming)
+                        except Exception as reply_exc:
+                            print(f"[钉钉交互] 回复消息失败: {reply_exc}")
+
+                    except Exception as exc:
+                        print(f"[钉钉交互] 处理消息异常: {exc}")
+                        import traceback
+                        traceback.print_exc()
+
+                    return dingtalk_stream.AckMessage.STATUS_OK, "OK"
+
+            # 创建凭据和客户端
+            credential = dingtalk_stream.Credential(app_key, app_secret)
+            client = dingtalk_stream.DingTalkStreamClient(credential)
+
+            # 注册机器人消息处理器（topic 固定值）
+            client.register_callback_handler(
+                dingtalk_stream.chatbot.ChatbotMessage.TOPIC,
+                T3ChatbotHandler(),
+            )
 
             self._stream_client = client
-            client.start_async()
+
+            # 在独立线程中启动 event loop，避免阻塞插件主线程
+            def _run_stream():
+                loop = None
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    print(f"[钉钉交互] Stream 连接线程已启动 (AppKey={app_key[:6]}...)")
+                    loop.run_until_complete(client.start())
+                except Exception as exc:
+                    print(f"[钉钉交互] Stream 连接异常（将自动重连）: {exc}")
+                finally:
+                    if loop:
+                        try:
+                            loop.close()
+                        except Exception:
+                            pass
+                    plugin_ref._stream_connected = False
+                    print(f"[钉钉交互] Stream 连接已断开")
+
+            stream_thread = threading.Thread(target=_run_stream, daemon=True, name="dingtalk-stream")
+            stream_thread.start()
             self._stream_connected = True
-            print(f"[钉钉交互] Stream 连接已启动 (AppKey={app_key[:6]}...)")
+            print(f"[钉钉交互] Stream 连接已启动 (AppKey={app_key[:6]}..., topic={dingtalk_stream.chatbot.ChatbotMessage.TOPIC})")
             return True
+
         except ImportError:
             print(f"[钉钉交互] dingtalk-stream SDK 未安装，Stream 模式不可用。请安装: pip install dingtalk-stream")
             return False
@@ -440,43 +530,6 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
             import traceback
             traceback.print_exc()
             return False
-
-    def _handle_chatbot_message(self, message: Any) -> tuple[int, str]:
-        """处理钉钉机器人消息。"""
-        text_content = ""
-        sender_nick = ""
-        conversation_id = ""
-        chat_type = "single"
-
-        try:
-            text_content = message.text.content if hasattr(message, "text") and message.text else ""
-            sender_nick = message.sender_nick if hasattr(message, "sender_nick") else ""
-            conversation_id = message.conversation_id if hasattr(message, "conversation_id") else ""
-            chat_type = message.chat_type if hasattr(message, "chat_type") else "single"
-        except Exception:
-            pass
-
-        print(f"[钉钉交互] 收到消息: sender={sender_nick}, type={chat_type}, content={text_content[:100]}")
-
-        # 解析并执行命令
-        reply_text = self._process_user_command(text_content, sender_nick)
-
-        # 回复消息
-        try:
-            message.reply_text(reply_text)
-        except Exception as exc:
-            print(f"[钉钉交互] 回复消息失败: {exc}")
-            # 尝试通过 API 回复
-            self._reply_via_api(conversation_id, reply_text)
-
-        return 0, "OK"
-
-    def _reply_via_api(self, conversation_id: str, text: str) -> None:
-        """通过 API 回复消息（fallback）。"""
-        if not conversation_id:
-            return
-        # 钉钉消息回复需要通过 API，这里简化处理
-        print(f"[钉钉交互] API回复 (conversation={conversation_id[:20]}...): {text[:100]}")
 
     # ==================== 命令处理 ====================
 
