@@ -394,7 +394,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.2.3"
+    plugin_version = "2.2.4"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -402,6 +402,8 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         self._event_buffer: dict[str, dict[str, Any]] = {}
         # 已发送的 task_id 集合，防止重复
         self._sent_tasks: set[str] = set()
+        # 已发送事件的时间戳（去重用）: dedup_key -> 发送时间
+        self._sent_task_times: dict[str, float] = {}
         # 平台本地 API 基础地址（尝试自动探测）
         self._api_base: str | None = None
 
@@ -1108,6 +1110,31 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
     def _handle_safe(self, event: dict[str, Any]) -> dict[str, Any]:
         event_type = str(event.get("event_type") or "unknown")
+        task_id = str(event.get("task_id") or "")
+        execution_id = str(event.get("execution_id") or "")
+
+        # ===== 去重：同一 execution_id 60秒内只发一次（防止同一任务两条通知） =====
+        dedup_key = f"{execution_id or task_id}:{event_type}"
+        now = time.time()
+        if dedup_key in self._sent_tasks:
+            last_sent = self._sent_task_times.get(dedup_key, 0)
+            if now - last_sent < 60:
+                print(f"[钉钉Bot][去重] 跳过重复事件: dedup_key={dedup_key}（{int(now - last_sent)}秒前已发送）")
+                return self._make_result(event_type, "", "", bool(str(self._resolve_config().get("webhook_url") or "").strip()), skipped=True)
+        # 清理过期的时间记录
+        expired_times = [k for k, v in self._sent_task_times.items() if now - v > 300]
+        for k in expired_times:
+            self._sent_task_times.pop(k, None)
+
+        # ===== 从事件 payload 中提取 play_domain（平台内部地址，最准确） =====
+        payload = dict(event.get("payload") or {})
+        data = dict(payload.get("data") or {})
+        play_domain = str(data.get("play_domain") or "").strip()
+        if play_domain and not self._api_base:
+            # play_domain 是平台内部监听的地址，格式如 http://127.0.0.1:8521
+            normalized_domain = play_domain.rstrip("/")
+            print(f"[钉钉Bot][平台API] 从payload提取到play_domain: {normalized_domain}，将其作为API地址")
+            self._api_base = f"{normalized_domain}/api"
 
         # ===== 全量事件调试打印（无论是否订阅都打印完整结构） =====
         try:
@@ -1146,6 +1173,10 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         except Exception as exc:
             title, content = f"[{event.get('task_id', '')}] 通知", f"构建消息失败: {exc}"
         if configured:
+            # 发送前记录去重信息
+            dedup_key = f"{execution_id or task_id}:{event_type}"
+            self._sent_tasks.add(dedup_key)
+            self._sent_task_times[dedup_key] = time.time()
             self._do_send(title, content, event_type)
         return self._make_result(event_type, title, content, configured)
 
