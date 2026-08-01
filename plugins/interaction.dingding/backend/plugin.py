@@ -193,7 +193,7 @@ def build_command_detail(command_name: str, prefix: str = "/") -> str:
 class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
     plugin_id = "interaction.dingding"
     plugin_name = "钉钉交互机器人"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -201,6 +201,7 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
         self._stream_client = None
         self._stream_connected = False
         self._stream_stop_event = None
+        self._first_welcome_sent = False
 
     # ==================== 配置管理 ====================
 
@@ -469,14 +470,35 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
 
                         print(f"[钉钉交互] 收到消息: sender={sender_nick}, type={chat_type}, content={text_content[:100]}")
 
-                        # 解析并执行命令
-                        reply_text = plugin_ref._process_user_command(text_content, sender_nick)
-
-                        # 回复消息
-                        try:
-                            self.reply_text(reply_text, incoming)
-                        except Exception as reply_exc:
-                            print(f"[钉钉交互] 回复消息失败: {reply_exc}")
+                        # 首次收到消息时，发送欢迎/验证消息
+                        is_first_message = not plugin_ref._first_welcome_sent
+                        if is_first_message:
+                            plugin_ref._first_welcome_sent = True
+                            welcome_msg = (
+                                "🎉 **T3 影视助手已成功连接！**\n"
+                                "─────────────────────\n"
+                                f"发送人：{sender_nick}\n"
+                                f"会话类型：{'群聊' if chat_type == 'group' else '单聊'}\n"
+                                "─────────────────────\n"
+                                "✅ 配置正确，通讯正常！\n\n"
+                                "输入「帮助」查看所有可用命令。"
+                            )
+                            try:
+                                self.reply_text(welcome_msg, incoming)
+                            except Exception as reply_exc:
+                                print(f"[钉钉交互] 发送欢迎消息失败: {reply_exc}")
+                            print("")
+                            print("╔══════════════════════════════════════════════════════════════╗")
+                            print("║  ✅  钉钉交互机器人首次通讯成功！已发送欢迎/验证消息          ║")
+                            print("╚══════════════════════════════════════════════════════════════╝")
+                            print("")
+                        else:
+                            # 解析并执行命令
+                            reply_text = plugin_ref._process_user_command(text_content, sender_nick)
+                            try:
+                                self.reply_text(reply_text, incoming)
+                            except Exception as reply_exc:
+                                print(f"[钉钉交互] 回复消息失败: {reply_exc}")
 
                     except Exception as exc:
                         print(f"[钉钉交互] 处理消息异常: {exc}")
@@ -519,7 +541,17 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
             stream_thread = threading.Thread(target=_run_stream, daemon=True, name="dingtalk-stream")
             stream_thread.start()
             self._stream_connected = True
-            print(f"[钉钉交互] Stream 连接已启动 (AppKey={app_key[:6]}..., topic={dingtalk_stream.chatbot.ChatbotMessage.TOPIC})")
+            print("")
+            print("╔══════════════════════════════════════════════════════════════╗")
+            print("║  ✅  钉钉交互机器人 Stream 模式连接成功！                     ║")
+            print("╠══════════════════════════════════════════════════════════════╣")
+            print(f"║  AppKey:  {app_key[:8]}...{app_key[-4:]}")
+            print(f"║  Topic:   {dingtalk_stream.chatbot.ChatbotMessage.TOPIC}")
+            print("║                                                              ║")
+            print("║  请在钉钉群中 @机器人 输入「帮助」测试通讯是否正常。         ║")
+            print("║  如无回复，请查看平台日志中 [钉钉交互] 开头的日志。          ║")
+            print("╚══════════════════════════════════════════════════════════════╝")
+            print("")
             return True
 
         except ImportError:
