@@ -193,7 +193,7 @@ def build_command_detail(command_name: str, prefix: str = "/") -> str:
 class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
     plugin_id = "interaction.dingding"
     plugin_name = "钉钉交互机器人"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -242,7 +242,7 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
             test_url = t3_base if t3_base.endswith("/api") or "/api/" in t3_base else t3_base.rstrip("/") + "/api"
             try:
                 test_headers = {t3_header: t3_key}
-                with httpx.Client(timeout=5, headers=test_headers) as client:
+                with httpx.Client(timeout=3, headers=test_headers) as client:
                     resp = client.get(f"{test_url}/tasks?limit=1")
                     if resp.status_code == 200:
                         print(f"[钉钉交互][配置校验] T3 API 联通性测试通过")
@@ -419,7 +419,7 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
         return False
 
     def _reconnect_stream(self) -> None:
-        """配置变更后重连 Stream。"""
+        """配置变更后异步重连 Stream（不阻塞主线程）。"""
         self._stream_connected = False
         self._stream_stop_event = None
         if self._stream_client is not None:
@@ -428,8 +428,11 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
             except Exception:
                 pass
             self._stream_client = None
-        print(f"[钉钉交互] Stream 连接已重置，尝试重新连接...")
-        self._start_stream_if_needed()
+        print(f"[钉钉交互] Stream 连接已重置，将在后台异步重新连接...")
+        # 异步启动，不阻塞配置保存流程
+        import threading
+        t = threading.Thread(target=self._start_stream_if_needed, daemon=True, name="dingtalk-stream-starter")
+        t.start()
 
     def _start_stream_if_needed(self) -> bool:
         """启动钉钉 Stream 连接（如果已配置凭据）。"""
@@ -1047,9 +1050,11 @@ class DingdingInteractionPlugin(BasePlugin, AssistantProvider):
     # ==================== 生命周期 ====================
 
     def enable(self, ctx: dict[str, Any] | None = None) -> None:
-        """插件启用时启动 Stream 连接。"""
-        print(f"[钉钉交互] 插件已启用")
-        self._start_stream_if_needed()
+        """插件启用时异步启动 Stream 连接（不阻塞）。"""
+        print(f"[钉钉交互] 插件已启用，将在后台异步启动 Stream 连接...")
+        import threading
+        t = threading.Thread(target=self._start_stream_if_needed, daemon=True, name="dingtalk-stream-enable")
+        t.start()
 
     def disable(self, ctx: dict[str, Any] | None = None) -> None:
         """插件禁用时关闭 Stream 连接。"""
