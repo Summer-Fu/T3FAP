@@ -394,7 +394,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.2.1"
+    plugin_version = "2.2.2"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -572,7 +572,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         return None
 
     def _fetch_api(self, path: str) -> tuple[bool, Any]:
-        """调用平台 API，返回 (是否成功, 数据)。"""
+        """调用平台 API，返回 (是否成功, 数据)。同时发送 x-api-key 和 Authorization Bearer 两种认证。"""
         base = self._get_api_base()
         if not base:
             return False, "未探测到平台API地址"
@@ -592,11 +592,20 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         url = f"{api_base_url}{clean_path}"
         # 获取认证凭据
         _, api_key, api_header_name = self._get_api_credentials()
+        # 同时发送两种认证 header（x-api-key 和 Authorization Bearer）
+        # 平台源码 deps.py 的 _extract_api_key 函数同时支持这两种方式
         headers: dict[str, str] = {}
-        if api_key and api_header_name:
+        if api_key:
+            # 方式1: 用户配置的 header 名（默认 X-API-Key）
             headers[api_header_name] = api_key
+            # 方式2: 标准 Bearer Token
+            headers["Authorization"] = f"Bearer {api_key}"
+            # 方式3: 全小写 x-api-key（保险，HTTP header 不区分大小写，但某些代理可能有问题）
+            if api_header_name.lower() != "x-api-key":
+                headers["x-api-key"] = api_key
         key_mask = api_key[:8] + "***" + api_key[-4:] if api_key and len(api_key) > 12 else ("已设置" if api_key else "未设置")
-        print(f"[钉钉Bot][API调用] GET {url}  header={api_header_name} key={key_mask}")
+        header_names = list(headers.keys())
+        print(f"[钉钉Bot][API调用] GET {url}  headers={header_names} key={key_mask}")
         try:
             with httpx.Client(timeout=10, headers=headers) as client:
                 resp = client.get(url)
