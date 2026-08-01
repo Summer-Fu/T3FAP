@@ -1,7 +1,7 @@
 {
   "id": "automation.dingding_bot",
   "name": "钉钉 Bot",
-  "version": "2.1.6",
+  "version": "2.1.7",
   "category": "automation",
   "description": "监听任务和系统事件，通过钉钉群机器人发送通知消息。支持加签安全设置、@指定人。",
   "author": "T3FAP Community",
@@ -78,8 +78,8 @@
       "label": "T3 平台 API 地址",
       "type": "string",
       "required": false,
-      "default": "http://192.168.1.219:8521/api",
-      "description": "T3 平台的 API 基础地址，例如 http://192.168.1.219:8521/api。已预填局域网默认地址，也可填写 T3MT 官方平台地址。",
+      "default": "https://t3.midsummer.asia:28888/api",
+      "description": "T3 平台的 API 基础地址，例如 https://t3.midsummer.asia:28888/api。也可填写局域网地址。",
       "secret": false,
       "group": "高级设置"
     },
@@ -88,8 +88,8 @@
       "label": "T3 平台 API Key",
       "type": "string",
       "required": false,
-      "default": "",
-      "description": "T3 平台的 API Key，用于调用平台接口获取任务详情和执行日志。请在 T3 平台个人设置中生成。",
+      "default": "t3mt_QzuZ7KKiKA0rEfKYB5z6jk3ktmfLAWL3NpLgxYpJbrs",
+      "description": "T3 平台的 API Key，用于调用平台接口获取任务详情和执行日志。",
       "secret": true,
       "group": "高级设置"
     },

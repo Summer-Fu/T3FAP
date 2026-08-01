@@ -34,8 +34,8 @@ DEFAULT_EVENTS = [
 ]
 
 # 默认 T3 平台 API 配置（当用户未在插件设置中填写时使用）
-DEFAULT_T3_API_BASE = "http://192.168.1.219:8521/api"
-DEFAULT_T3_API_KEY = "t3mt_HlX7EXoEKvMTFitkvMs75QvjCvcZN9t4kT0J-WQ1f5U"
+DEFAULT_T3_API_BASE = "https://t3.midsummer.asia:28888/api"
+DEFAULT_T3_API_KEY = "t3mt_QzuZ7KKiKA0rEfKYB5z6jk3ktmfLAWL3NpLgxYpJbrs"
 DEFAULT_T3_API_HEADER = "X-API-Key"
 
 EVENT_CATEGORY = {
@@ -388,7 +388,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.1.6"
+    plugin_version = "2.1.7"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -495,21 +495,37 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             else:
                 candidates.append(remote_default)
 
-        # 逐个测试，返回第一个可达的
+        # 获取认证凭据（探测时也带上，验证是否真正可用）
+        _, probe_key, probe_header = self._get_api_credentials()
+        probe_headers: dict[str, str] = {}
+        if probe_key and probe_header:
+            probe_headers[probe_header] = probe_key
+
+        # 逐个测试，优先返回认证通过（200）的地址
         print(f"[钉钉Bot][平台API] 开始探测 {len(candidates)} 个候选地址...")
+        # 第一轮：找认证通过的（200）
         for base in candidates:
-            # 构造测试 URL
+            test_url = base if "/api" in base else f"{base}/api"
+            try:
+                with httpx.Client(timeout=1.5, headers=probe_headers) as client:
+                    resp = client.get(f"{test_url}/tasks?limit=1")
+                    if resp.status_code == 200:
+                        self._api_base = base
+                        print(f"[钉钉Bot][平台API] 探测成功（认证通过）: {base}")
+                        return base
+            except Exception:
+                continue
+        # 第二轮：找地址可达但可能没认证的（<500），最后兜底
+        for base in candidates:
             test_url = base if "/api" in base else f"{base}/api"
             try:
                 with httpx.Client(timeout=1.5) as client:
                     resp = client.get(f"{test_url}/tasks?limit=1")
-                    # 只要有响应（即使是401/403）都说明地址是通的
                     if resp.status_code < 500:
                         self._api_base = base
-                        print(f"[钉钉Bot][平台API] 探测成功: {base} (HTTP {resp.status_code})")
+                        print(f"[钉钉Bot][平台API] 探测成功（地址可达，需认证）: {base} (HTTP {resp.status_code})")
                         return base
-            except Exception as e:
-                # 这个地址不通，继续下一个
+            except Exception:
                 continue
 
         print(f"[钉钉Bot][平台API] 所有 {len(candidates)} 个候选地址均不可达")
