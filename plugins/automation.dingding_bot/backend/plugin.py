@@ -360,7 +360,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.1.4"
+    plugin_version = "2.1.5"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -759,6 +759,35 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         if len(self._sent_tasks) > 1000:
             self._sent_tasks = set(list(self._sent_tasks)[-500:])
 
+    def _safe_build_message(self, event: dict[str, Any]) -> tuple[str, str]:
+        """安全地构建消息，任何异常都返回兜底消息，防止静默失败。"""
+        try:
+            return self._build_message(event)
+        except Exception as exc:
+            import traceback
+            print(f"[钉钉Bot][严重] _build_message 异常: {exc}")
+            traceback.print_exc()
+            # 兜底消息：至少保证能收到通知
+            event_type = str(event.get("event_type") or "unknown")
+            task_id = str(event.get("task_id") or "")
+            payload = dict(event.get("payload") or {})
+            task_name = str(
+                payload.get("task_title")
+                or payload.get("title")
+                or event.get("task_type")
+                or event_type
+            )
+            task_id_prefix = f"[{task_id}] " if task_id else ""
+            title = f"{task_id_prefix}{task_name} · 通知"
+            status = str(event.get("status") or "")
+            summary = str(payload.get("summary") or payload.get("message") or "")
+            content = (
+                f"任务状态：{status}\n"
+                f"{summary}\n\n"
+                f"⚠️ 消息构建异常（详细错误已打印到日志）：\n{exc}"
+            )
+            return title, content
+
     def _flush_overdue_buffered(self) -> list[tuple[str, str]]:
         """将 buffer 中超过等待时限的事件取出来准备发送。"""
         now = time.time()
@@ -774,10 +803,16 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             is_complete = buf.get("complete", False)
             if is_complete or age > wait_window:
                 merged_event = buf.get("event", {})
-                title, content = self._build_message(merged_event)
-                results.append((title, content))
-                self._sent_tasks.add(key)
-                done_keys.append(key)
+                try:
+                    title, content = self._safe_build_message(merged_event)
+                    results.append((title, content))
+                    self._sent_tasks.add(key)
+                    done_keys.append(key)
+                except Exception as exc:
+                    print(f"[钉钉Bot][严重] 处理缓存事件失败: {exc}")
+                    # 出错也标记为已处理，防止死循环
+                    self._sent_tasks.add(key)
+                    done_keys.append(key)
 
         for k in done_keys:
             self._event_buffer.pop(k, None)
@@ -787,6 +822,20 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     # ==================== 事件处理 ====================
 
     def handle(self, event: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self._handle_safe(event)
+        except Exception as exc:
+            import traceback
+            print(f"[钉钉Bot][严重] handle 顶层异常: {exc}")
+            traceback.print_exc()
+            # 最兜底：即使什么都失败了，也要返回成功状态
+            return OperationResult(
+                success=True,
+                message=f"{self.plugin_name} 处理事件时出现异常（已打印到日志）：{exc}",
+                data={"event_type": str(event.get("event_type", "unknown"))},
+            ).model_dump(mode="json")
+
+    def _handle_safe(self, event: dict[str, Any]) -> dict[str, Any]:
         event_type = str(event.get("event_type") or "unknown")
         print(f"[钉钉Bot] 收到事件: {event_type}")
 
@@ -801,7 +850,10 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
         if event_type in immediate_events:
             # 直接发送，不做合并
-            title, content = self._build_message(event)
+            try:
+                title, content = self._safe_build_message(event)
+            except Exception as exc:
+                title, content = f"[{event.get('task_id', '')}] 通知", f"构建消息失败: {exc}"
             if configured:
                 self._do_send(title, content, event_type)
             return self._make_result(event_type, title, content, configured)
