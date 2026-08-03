@@ -432,6 +432,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         self._daily_stats_dirty: bool = False    # 统计数据是否有变更
         self._daily_stats_test_pending: bool = False  # 配置保存后是否需要立即推送统计（用于测试）
         self._daily_stats_last_push_date: str | None = None  # 上次日统计推送的日期（YYYY-MM-DD），防止同一天重复推送
+        self._daily_stats_pushed_times: set[str] = set()  # 今日已推送过的时间点（HH:MM 集合），支持多个推送时间
         # ---- 异步发送线程池 ----
         # 所有钉钉 HTTP 推送都在独立线程池中执行，避免阻塞事件回调线程
         self._sender_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dingding-sender")
@@ -1379,7 +1380,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             return None
 
         lines: list[str] = []
-        lines.append(f"📊 任务日统计（{today}）")
+        lines.append(f"📅 统计日期：{today}")
         lines.append("─" * 20)
 
         # 任务日统计情况
@@ -1426,41 +1427,54 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         """检查是否需要推送日统计，需要的话就推送。
 
         触发条件（任一满足即推送）：
-          1. 配置保存后的测试推送（_daily_stats_test_pending）
-          2. 到达每日定时推送时间（daily_stats_push_time），且当天还没推送过
+          1. 配置保存后的测试推送（_daily_stats_test_pending）—— 只推一次
+          2. 到达任一每日定时推送时间（支持多个，如 08:30,20:00）—— 每天每个时间点只推一次
         """
         should_push = False
         reason = ""
-        # 1. 配置保存后的测试推送
+        now = datetime.now()
+        today_str = now.strftime("%Y-%m-%d")
+
+        # 跨天清零：今日已推送时间点集合
+        if self._daily_stats_last_push_date != today_str:
+            self._daily_stats_pushed_times.clear()
+            self._daily_stats_last_push_date = today_str
+
+        # 1. 配置保存后的测试推送（只推一次）
         if self._daily_stats_test_pending:
             should_push = True
             reason = "配置保存测试"
             self._daily_stats_test_pending = False
 
-        # 2. 每日定时推送（事件驱动懒检查：每次有事件触发时顺手检查时间）
-        if not should_push:
-            push_time_str = str(cfg.get("daily_stats_push_time") or "23:55").strip()
-            if push_time_str and bool(cfg.get("daily_stats_enable")):
+        # 2. 每日定时推送（支持多个时间点，逗号/顿号/分号分隔）
+        if not should_push and bool(cfg.get("daily_stats_enable")):
+            push_time_raw = str(cfg.get("daily_stats_push_time") or "23:55").strip()
+            # 兼容多种分隔符：, 、 ; 以及空格，兼容 08-30 写法
+            import re as _re
+            time_candidates = [
+                t.strip().replace("-", ":")
+                for t in _re.split(r"[,、;；\s]+", push_time_raw)
+                if t.strip()
+            ]
+            for t in time_candidates:
                 try:
-                    now = datetime.now()
-                    today_str = now.strftime("%Y-%m-%d")
-                    # 解析配置的 HH:MM
-                    hour_str, minute_str = push_time_str.split(":")
+                    hour_str, minute_str = t.split(":")
                     push_hour = int(hour_str)
                     push_minute = int(minute_str)
-                    # 当前时间是否已到推送时间
                     already_past = (
                         now.hour > push_hour
                         or (now.hour == push_hour and now.minute >= push_minute)
                     )
-                    # 今天还没推送过
-                    not_pushed_today = self._daily_stats_last_push_date != today_str
-                    if already_past and not_pushed_today:
+                    # 该时间点今天还没推送过
+                    not_pushed = t not in self._daily_stats_pushed_times
+                    if already_past and not_pushed:
                         should_push = True
-                        reason = "每日定时"
+                        reason = f"每日定时（{t}）"
+                        self._daily_stats_pushed_times.add(t)
+                        break
                 except (ValueError, AttributeError):
                     # 时间格式解析失败就跳过
-                    pass
+                    continue
 
         if not should_push:
             return
@@ -1485,12 +1499,11 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 )
                 self._sender_executor.submit(self._send_worker, "📊 钉钉 Bot 日统计测试", test_msg, config_snapshot)
                 print(f"[钉钉Bot][日统计] {reason}推送已异步提交（开关状态提示）")
+            else:
+                print(f"[钉钉Bot][日统计] {reason}推送条件已满足但暂无可推送数据，跳过本次推送")
             return
 
         self._sender_executor.submit(self._send_worker, "📊 任务日统计", msg, config_snapshot)
-        # 记录今日已推送（仅定时推送需要记录，测试推送不占用每日名额）
-        if reason == "每日定时":
-            self._daily_stats_last_push_date = datetime.now().strftime("%Y-%m-%d")
         print(f"[钉钉Bot][日统计] {reason}推送已异步提交")
 
     def _make_result(
@@ -2285,8 +2298,9 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
         stat_line = "｜".join(stat_parts) if stat_parts else ""
 
-        # 判断是否无更新
+        # 判断是否无更新（数据标志判断 + summary 关键词兜底，任一命中即算无更新）
         is_no_update = False
+        # 1) 数据标志判断：计数为 0 且有跳过/无更新天数
         if (
             (saved_count is not None and saved_count == 0)
             or (transferred_count is not None and transferred_count == 0)
@@ -2296,6 +2310,25 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             or (no_update_days is not None and no_update_days > 0)
         ):
             is_no_update = True
+        # 2) summary 关键词兜底：平台已明确在 summary 里说"没有新的/无需生成/无更新"
+        if not is_no_update and summary:
+            no_update_keywords = (
+                "没有新的官网条目",
+                "没有需要下载的文件",
+                "没有需要转存的文件",
+                "没有新的内容",
+                "没有新内容",
+                "无需生成",
+                "无更新",
+                "没有更新",
+                "没有新",
+                "无需处理",
+                "已全部存在",
+                "均已存在",
+                "已存在",
+            )
+            if any(kw in summary for kw in no_update_keywords):
+                is_no_update = True
 
         # ==================== 按移动端友好简洁模板构建消息 ====================
 
