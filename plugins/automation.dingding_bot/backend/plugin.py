@@ -415,7 +415,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.6.1"
+    plugin_version = "2.6.2"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -430,9 +430,11 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         # ---- 日统计相关 ----
         self._daily_stats: dict[str, Any] = {}  # 内存中的统计数据
         self._daily_stats_dirty: bool = False    # 统计数据是否有变更
+        self._daily_stats_test_done: bool = False  # 是否已完成配置保存后的测试推送（做过就不再做）
         self._daily_stats_test_pending: bool = False  # 配置保存后是否需要立即推送统计（用于测试）
         self._daily_stats_last_push_date: str | None = None  # 上次日统计推送的日期（YYYY-MM-DD），防止同一天重复推送
         self._daily_stats_pushed_times: set[str] = set()  # 今日已推送过的时间点（HH:MM 集合），支持多个推送时间
+        self._last_config_hash: str | None = None  # 上次配置的哈希，用于检测配置是否真的变更
         # ---- 异步发送线程池 ----
         # 所有钉钉 HTTP 推送都在独立线程池中执行，避免阻塞事件回调线程
         self._sender_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dingding-sender")
@@ -780,6 +782,15 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
     def set_runtime_config(self, config: dict[str, Any]) -> None:
         normalized = self._normalize_runtime_config(config)
+        # 计算配置哈希，判断是否真的变更（框架可能每次事件都调用 set_runtime_config）
+        import hashlib
+        import json
+        try:
+            cur_hash = hashlib.md5(json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        except Exception:
+            cur_hash = str(normalized)
+        config_changed = (cur_hash != self._last_config_hash)
+        self._last_config_hash = cur_hash
         self._runtime_config = normalized
         keys = list(normalized.keys())
         has_webhook = bool(str(normalized.get("webhook_url") or "").strip())
@@ -792,8 +803,12 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         print(f"[钉钉Bot][配置] t3_api_base={t3_base or '未设置'}, t3_api_key={t3_key_mask}, t3_api_header={t3_header or '未设置'}")
         # 清除缓存的 API 地址，强制重新探测（因为配置可能变了）
         self._api_base = None
-        # 配置保存后，下一个任务完成时立即推送日统计（用于测试统计是否正常）
-        self._daily_stats_test_pending = True
+        # 只有配置真的变更了，才标记待测试推送（做过一次后会被 _maybe_push_daily_stats 置 done）
+        # （框架可能每次事件都调用 set_runtime_config，不能每次都置 True）
+        if config_changed:
+            self._daily_stats_test_done = False  # 配置变了，重置标志，允许再做一次测试推送
+            self._daily_stats_test_pending = True
+            print(f"[钉钉Bot][日统计] 配置已变更，待首条任务完成后推送测试统计")
 
     def validate_runtime_config(self, config: dict[str, Any]) -> OperationResult:
         normalized = self._normalize_runtime_config(config)
@@ -1445,6 +1460,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             should_push = True
             reason = "配置保存测试"
             self._daily_stats_test_pending = False
+            self._daily_stats_test_done = True
 
         # 2. 每日定时推送（支持多个时间点，逗号/顿号/分号分隔）
         if not should_push and bool(cfg.get("daily_stats_enable")):
@@ -2310,8 +2326,9 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             or (no_update_days is not None and no_update_days > 0)
         ):
             is_no_update = True
-        # 2) summary 关键词兜底：平台已明确在 summary 里说"没有新的/无需生成/无更新"
-        if not is_no_update and summary:
+        # 2) summary/detail_message 关键词兜底：平台已明确说明"没有新的/无需生成/无更新"
+        # （summary 里有就从 summary 判断，detail_message 也可能包含（会显示为"其他说明"）
+        if not is_no_update:
             no_update_keywords = (
                 "没有新的官网条目",
                 "没有需要下载的文件",
@@ -2326,8 +2343,10 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 "已全部存在",
                 "均已存在",
                 "已存在",
+                "没有缺失",
             )
-            if any(kw in summary for kw in no_update_keywords):
+            keyword_text = " ".join(x for x in (summary, detail_message) if x)
+            if keyword_text and any(kw in keyword_text for kw in no_update_keywords):
                 is_no_update = True
 
         # ==================== 按移动端友好简洁模板构建消息 ====================
