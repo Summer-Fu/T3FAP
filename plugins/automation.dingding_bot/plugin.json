@@ -1,7 +1,7 @@
 {
   "id": "automation.dingding_bot",
   "name": "钉钉 Bot",
-  "version": "2.5.3",
+  "version": "2.6.0",
   "category": "automation",
   "description": "监听任务和系统事件，通过钉钉群机器人发送通知消息。支持加签安全设置、@指定人。",
   "author": "T3FAP Community",
@@ -82,6 +82,26 @@
       "description": "需要在钉钉消息中 @ 的手机号列表，多个值用英文逗号分隔。",
       "secret": false,
       "group": "通知设置"
+    },
+    {
+      "key": "daily_stats_enable",
+      "label": "任务日统计情况推送",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "开启后自动累计当日各类型任务的执行情况（累计执行数/成功更新数/失败数/无更新数）。配置保存后完成任意一个任务会推送一次测试统计。",
+      "secret": false,
+      "group": "日统计数据"
+    },
+    {
+      "key": "daily_updates_enable",
+      "label": "当日更新情况推送",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "开启后在日统计中包含当日的更新明细（任务ID+名称、更新内容、最新更新时间）。首次转入不记录（内容太多），只记录已有内容的增量更新。",
+      "secret": false,
+      "group": "日统计数据"
     },
     {
       "key": "show_task_id",

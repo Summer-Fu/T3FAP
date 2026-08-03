@@ -414,7 +414,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.5.0"
+    plugin_version = "2.6.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -426,6 +426,10 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         self._sent_task_times: dict[str, float] = {}
         # 平台本地 API 基础地址（尝试自动探测）
         self._api_base: str | None = None
+        # ---- 日统计相关 ----
+        self._daily_stats: dict[str, Any] = {}  # 内存中的统计数据
+        self._daily_stats_dirty: bool = False    # 统计数据是否有变更
+        self._daily_stats_test_pending: bool = False  # 配置保存后是否需要立即推送统计（用于测试）
 
     # ==================== 平台本地 API 调用 ====================
 
@@ -782,6 +786,8 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         print(f"[钉钉Bot][配置] t3_api_base={t3_base or '未设置'}, t3_api_key={t3_key_mask}, t3_api_header={t3_header or '未设置'}")
         # 清除缓存的 API 地址，强制重新探测（因为配置可能变了）
         self._api_base = None
+        # 配置保存后，下一个任务完成时立即推送日统计（用于测试统计是否正常）
+        self._daily_stats_test_pending = True
 
     def validate_runtime_config(self, config: dict[str, Any]) -> OperationResult:
         normalized = self._normalize_runtime_config(config)
@@ -1052,8 +1058,10 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         if len(self._sent_tasks) > 1000:
             self._sent_tasks = set(list(self._sent_tasks)[-500:])
 
-    def _safe_build_message(self, event: dict[str, Any]) -> tuple[str, str]:
-        """安全地构建消息，任何异常都返回兜底消息，防止静默失败。"""
+    def _safe_build_message(self, event: dict[str, Any]) -> tuple[str, str, bool, dict[str, Any]]:
+        """安全地构建消息，任何异常都返回兜底消息，防止静默失败。
+        返回: (title, content, is_no_update, stats_info)
+        """
         try:
             return self._build_message(event)
         except Exception as exc:
@@ -1079,7 +1087,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 f"{summary}\n\n"
                 f"⚠️ 消息构建异常（详细错误已打印到日志）：\n{exc}"
             )
-            return title, content
+            return title, content, False, {}
 
     def _flush_overdue_buffered(self) -> list[tuple[str, str]]:
         """将 buffer 中超过等待时限的事件取出来准备发送。"""
@@ -1189,35 +1197,49 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
         # ===== 所有订阅事件都立即发送（取消合并缓冲，防止STRM等事件被吞掉） =====
         try:
-            title, content = self._safe_build_message(event)
+            title, content, is_no_update, stats_info = self._safe_build_message(event)
         except Exception as exc:
-            title, content = f"[{event.get('task_id', '')}] 通知", f"构建消息失败: {exc}"
+            title, content, is_no_update, stats_info = f"[{event.get('task_id', '')}] 通知", f"构建消息失败: {exc}", False, {}
 
-        # ===== 无更新不推送（总开关） =====
+        # ===== 无更新不推送（总开关）—— 直接使用 _build_message 返回的数据标志，不靠关键词猜 =====
         skip_no_update = bool(cfg.get("skip_no_update_notify"))
         is_task_event = event_type.startswith("task.")
-        no_update_keywords = (
-            "无更新",          # 标题：xxx · 无更新；其他说明：本次无更新
-            "没有新",          # STRM：没有新的官网条目
-            "没有发现新",       # STRM：没有发现新的条目
-            "全部已存在",       # 转存/下载：0 项（全部已存在）
-            "已存在相同文件",    # 转存：本次无更新（已存在相同文件）
-            "待生成 0",         # STRM：本次待生成 0 个
-            "生成 0 个",        # 批量STRM：已生成 0 个文件
-            "没有需要下载",      # 下载任务：没有需要下载的文件
-            "不需要下载",        # 下载任务：不需要下载任何文件
-        )
-        combined_text = f"{title}\n{content}"
-        is_no_update_msg = any(kw in combined_text for kw in no_update_keywords)
-        if skip_no_update and is_task_event and is_no_update_msg:
+        if skip_no_update and is_task_event and is_no_update:
             print(f"[钉钉Bot] 任务 {execution_id or task_id} 结果为「无更新」，skip_no_update_notify=true，跳过推送")
             return self._make_result(event_type, title, content, configured, skipped=True)
+
+        # ===== 更新日统计（不管是否推送单条消息，都累计统计） =====
+        if is_task_event and stats_info:
+            try:
+                self._record_task_to_daily_stats(
+                    task_type_label=stats_info.get("task_type_label", ""),
+                    task_id=stats_info.get("task_id", ""),
+                    task_name=stats_info.get("task_name", ""),
+                    is_no_update=stats_info.get("is_no_update", False),
+                    is_failed=stats_info.get("is_failed", False),
+                    is_started=stats_info.get("is_started", False),
+                    update_content=stats_info.get("update_content", ""),
+                    latest_update_time=stats_info.get("latest_update_time", ""),
+                    latest_episode=stats_info.get("latest_episode", ""),
+                    first_run_of_task=stats_info.get("first_run_of_task", False),
+                )
+            except Exception as exc:
+                print(f"[钉钉Bot][日统计] 记录任务失败: {exc}")
+
+        # ===== 发送单条任务消息 =====
         if configured:
             # 发送前记录去重信息
             dedup_key = f"{execution_id or task_id}:{event_type}"
             self._sent_tasks.add(dedup_key)
             self._sent_task_times[dedup_key] = time.time()
             self._do_send(title, content, event_type)
+
+        # ===== 检查是否需要推送日统计（配置保存后的测试推送等） =====
+        try:
+            self._maybe_push_daily_stats(cfg)
+        except Exception as exc:
+            print(f"[钉钉Bot][日统计] 推送失败: {exc}")
+
         return self._make_result(event_type, title, content, configured)
 
     def _do_send(self, title: str, content: str, event_type: str) -> None:
@@ -1233,6 +1255,207 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             import traceback
             print(f"[钉钉Bot] 发送失败: {exc}")
             traceback.print_exc()
+
+    # ==================== 日统计功能 ====================
+
+    def _get_daily_stats_file(self) -> str:
+        """获取日统计数据文件路径。"""
+        import os
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        data_dir = os.path.join(base_dir, "data")
+        os.makedirs(data_dir, exist_ok=True)
+        return os.path.join(data_dir, "daily_stats.json")
+
+    def _today_str(self) -> str:
+        """获取今日日期字符串（YYYY-MM-DD）。"""
+        import datetime
+        return datetime.datetime.now().strftime("%Y-%m-%d")
+
+    def _load_daily_stats(self) -> dict[str, Any]:
+        """加载日统计数据，跨天自动清零。"""
+        import os, json
+        today = self._today_str()
+        # 内存中有就先用内存的
+        if self._daily_stats and self._daily_stats.get("date") == today:
+            return self._daily_stats
+        fpath = self._get_daily_stats_file()
+        data: dict[str, Any] = {"date": today, "by_type": {}}
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if loaded.get("date") == today:
+                    data = loaded
+                else:
+                    print(f"[钉钉Bot][日统计] 日期变更 {loaded.get('date')} -> {today}，重置统计")
+            except Exception as exc:
+                print(f"[钉钉Bot][日统计] 加载文件失败: {exc}，使用新统计")
+        self._daily_stats = data
+        self._daily_stats_dirty = False
+        return data
+
+    def _save_daily_stats(self, data: dict[str, Any]) -> None:
+        """保存日统计数据到文件。"""
+        import json
+        if not self._daily_stats_dirty:
+            return
+        fpath = self._get_daily_stats_file()
+        try:
+            with open(fpath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self._daily_stats_dirty = False
+        except Exception as exc:
+            print(f"[钉钉Bot][日统计] 保存文件失败: {exc}")
+
+    def _record_task_to_daily_stats(
+        self,
+        task_type_label: str,
+        task_id: str,
+        task_name: str,
+        is_no_update: bool,
+        is_failed: bool,
+        is_started: bool,
+        update_content: str,
+        latest_update_time: str,
+        latest_episode: str,
+        first_run_of_task: bool,
+    ) -> None:
+        """记录单条任务到日统计。"""
+        # 只记录完成/失败/无更新状态的（started 和 created 不计入）
+        if is_started:
+            return
+        if not task_type_label:
+            task_type_label = "未知任务"
+
+        stats = self._load_daily_stats()
+        today = self._today_str()
+        if stats.get("date") != today:
+            stats = {"date": today, "by_type": {}}
+
+        type_data = stats["by_type"].get(task_type_label)
+        if not type_data:
+            type_data = {
+                "total": 0,       # 累计执行
+                "updated": 0,     # 成功更新（有新内容）
+                "failed": 0,      # 失败
+                "no_update": 0,   # 无更新
+                "updates": [],    # 更新明细（当日更新情况，排除首次转入）
+            }
+            stats["by_type"][task_type_label] = type_data
+
+        type_data["total"] += 1
+        if is_failed:
+            type_data["failed"] += 1
+        elif is_no_update:
+            type_data["no_update"] += 1
+        else:
+            type_data["updated"] += 1
+            # 排除首次转入（内容太多），只记录"当日更新"的情况
+            if not first_run_of_task:
+                type_data["updates"].append({
+                    "task_id": task_id,
+                    "task_name": task_name,
+                    "update_content": update_content,
+                    "latest_update_time": latest_update_time,
+                    "latest_episode": latest_episode,
+                })
+
+        self._daily_stats = stats
+        self._daily_stats_dirty = True
+        self._save_daily_stats(stats)
+
+    def _build_daily_stats_message(self, cfg: dict[str, Any]) -> str | None:
+        """构建日统计推送消息。返回 None 表示不需要推送。"""
+        show_daily_stats = bool(cfg.get("daily_stats_enable"))
+        show_daily_updates = bool(cfg.get("daily_updates_enable"))
+        if not show_daily_stats and not show_daily_updates:
+            return None
+
+        stats = self._load_daily_stats()
+        today = stats.get("date", self._today_str())
+        by_type = stats.get("by_type", {})
+        if not by_type:
+            return None
+
+        lines: list[str] = []
+        lines.append(f"📊 任务日统计（{today}）")
+        lines.append("─" * 20)
+
+        # 任务日统计情况
+        if show_daily_stats:
+            lines.append("📋 任务执行情况：")
+            for type_label, type_data in sorted(by_type.items()):
+                total = type_data.get("total", 0)
+                updated = type_data.get("updated", 0)
+                failed = type_data.get("failed", 0)
+                no_update = type_data.get("no_update", 0)
+                lines.append(
+                    f"  🏷️ {type_label}：累计执行 {total} 个｜"
+                    f"成功更新 {updated} 个｜失败 {failed} 个｜无更新 {no_update} 个"
+                )
+            lines.append("")
+
+        # 当日更新情况（排除首次转入）
+        if show_daily_updates:
+            lines.append("🆕 当日更新情况：")
+            has_any_update = False
+            for type_label, type_data in sorted(by_type.items()):
+                updates = type_data.get("updates", [])
+                if not updates:
+                    continue
+                has_any_update = True
+                for u in updates:
+                    tid = u.get("task_id", "")
+                    tname = u.get("task_name", "")
+                    ucontent = u.get("update_content", "")
+                    utime = u.get("latest_update_time", "")
+                    prefix = f"[{tid}] {tname}" if tid else tname
+                    lines.append(f"  🏷️ {type_label}")
+                    lines.append(f"    📌 {prefix}")
+                    if ucontent:
+                        lines.append(f"    📝 更新内容：{ucontent}")
+                    if utime:
+                        lines.append(f"    🕐 最新更新时间：{utime}")
+            if not has_any_update:
+                lines.append("  （今日暂无非首次的更新记录）")
+
+        return "\n".join(lines)
+
+    def _maybe_push_daily_stats(self, cfg: dict[str, Any]) -> None:
+        """检查是否需要推送日统计，需要的话就推送。"""
+        should_push = False
+        reason = ""
+        # 1. 配置保存后的测试推送
+        if self._daily_stats_test_pending:
+            should_push = True
+            reason = "配置保存测试"
+            self._daily_stats_test_pending = False
+
+        if not should_push:
+            return
+
+        if not bool(str(cfg.get("webhook_url") or "").strip()):
+            print(f"[钉钉Bot][日统计] webhook 未配置，跳过{reason}推送")
+            return
+
+        msg = self._build_daily_stats_message(cfg)
+        if msg is None:
+            # 两个开关都关闭或者还没有数据，但测试模式下还是推个提示
+            if "测试" in reason:
+                test_msg = (
+                    f"📊 任务日统计（测试推送）\n"
+                    f"─" * 20 + "\n"
+                    f"当前日统计相关开关：\n"
+                    f"  - 任务日统计情况推送：{'✅ 开启' if bool(cfg.get('daily_stats_enable')) else '❌ 关闭'}\n"
+                    f"  - 当日更新情况推送：{'✅ 开启' if bool(cfg.get('daily_updates_enable')) else '❌ 关闭'}\n"
+                    f"\n配置已生效，如有任务完成会自动累计统计。"
+                )
+                self._send_to_dingtalk("📊 钉钉 Bot 日统计测试", test_msg)
+                print(f"[钉钉Bot][日统计] {reason}推送已发送（开关状态提示）")
+            return
+
+        self._send_to_dingtalk("📊 任务日统计", msg)
+        print(f"[钉钉Bot][日统计] {reason}推送已发送")
 
     def _make_result(
         self, event_type: str, title: str, content: str,
@@ -1305,7 +1528,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
     # ==================== 消息构建核心 ====================
 
-    def _build_message(self, event: dict[str, Any]) -> tuple[str, str]:
+    def _build_message(self, event: dict[str, Any]) -> tuple[str, str, bool, dict[str, Any]]:
         event_type = str(event.get("event_type") or "unknown")
         source = str(event.get("source") or "core")
         plugin_id = str(event.get("plugin_id") or "")
@@ -2040,6 +2263,37 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         is_started = event_type == "task.started"
         is_no_update = bool(is_no_update)
 
+        # 组装日统计需要的信息
+        # 判断是否首次转入（之前没转过，skipped_count 为 0 且有实际新增内容）
+        has_new_content = (
+            (saved_count is not None and saved_count > 0)
+            or (generated_item_count is not None and generated_item_count > 0)
+        )
+        first_run_of_task = bool(has_new_content and (skipped_count is None or skipped_count == 0))
+        # 组装更新内容简述
+        update_parts = []
+        if saved_count is not None and saved_count > 0:
+            saved_files_preview = _format_file_list(saved_files, max_items=5) if saved_files else ""
+            update_parts.append(f"转存成功 {saved_count} 项{saved_files_preview}")
+        if generated_item_count is not None and generated_item_count > 0:
+            gen_preview = _format_file_list(saved_files, max_items=5) if saved_files else ""
+            update_parts.append(f"生成 {generated_item_count} 项{gen_preview}")
+        update_content = "｜".join(update_parts)
+        # 最新剧集名
+        latest_episode_name = latest_episode_file or (f"第 {latest_episode_number} 集" if latest_episode_number else "")
+        stats_info: dict[str, Any] = {
+            "task_id": task_id,
+            "task_name": task_name,
+            "task_type_label": task_type_label,
+            "is_failed": is_failed,
+            "is_started": is_started,
+            "is_no_update": is_no_update,
+            "update_content": update_content,
+            "latest_update_time": latest_episode_update_time or "",
+            "latest_episode": latest_episode_name,
+            "first_run_of_task": first_run_of_task,
+        }
+
         # 状态显示
         if is_failed:
             status_display = "❌ 失败"
@@ -2326,13 +2580,13 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         if is_system_event:
             event_label = EVENT_CATEGORY.get(event_type, event_type)
             title = f"🔔 {event_label}"
-            return title, "\n".join(lines) if lines else f"系统事件：{event_type}"
+            return title, "\n".join(lines) if lines else f"系统事件：{event_type}", False, {}
 
         if is_plugin_event:
             event_label = EVENT_CATEGORY.get(event_type, event_type)
             p_name = str(payload.get("plugin_name") or payload.get("name") or payload.get("plugin_id") or "") if isinstance(payload, dict) else ""
             title = f"🔌 {event_label}：{p_name}" if p_name else f"🔌 {event_label}"
-            return title, "\n".join(lines) if lines else f"插件事件：{event_type}"
+            return title, "\n".join(lines) if lines else f"插件事件：{event_type}", False, {}
 
         # 任务事件标题
         if event_type == "task.completed":
@@ -2340,30 +2594,36 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 title = f"{task_id_prefix}{task_name} · 无更新"
             else:
                 title = f"{task_id_prefix}{task_name} · 完成"
-            return title, "\n".join(lines) if lines else f"{task_name} 已完成。"
+            return title, "\n".join(lines) if lines else f"{task_name} 已完成。", is_no_update, stats_info
 
         if event_type == "task.failed":
             title = f"{task_id_prefix}{task_name} · 失败"
             if error_text:
                 lines.insert(0, f"❌ {error_text}")
-            return title, "\n".join(lines) if lines else f"{task_name} 执行失败：{error_text or '未知错误'}"
+            return title, "\n".join(lines) if lines else f"{task_name} 执行失败：{error_text or '未知错误'}", False, stats_info
 
         if event_type == "task.canceled":
             title = f"{task_id_prefix}{task_name} · 已取消"
-            return title, "\n".join(lines) if lines else f"{task_name} 已取消。"
+            return title, "\n".join(lines) if lines else f"{task_name} 已取消。", False, stats_info
 
         if event_type == "task.started":
             title = f"{task_id_prefix}{task_name} · 开始"
-            return title, "\n".join(lines) if lines else f"{task_name} 已开始执行。"
+            return title, "\n".join(lines) if lines else f"{task_name} 已开始执行。", False, stats_info
 
         if event_type == "task.created":
             title = f"{task_id_prefix}{task_name} · 已创建"
-            return title, "\n".join(lines) if lines else f"已创建新任务：{task_name}"
+            return title, "\n".join(lines) if lines else f"已创建新任务：{task_name}", False, stats_info
 
-        title = f"{task_id_prefix}{task_name}"
+        # post_execute 系列事件（STRM、下载、转存等）—— 也统一带状态后缀
+        if is_no_update:
+            title = f"{task_id_prefix}{task_name} · 无更新"
+        elif is_failed:
+            title = f"{task_id_prefix}{task_name} · 失败"
+        else:
+            title = f"{task_id_prefix}{task_name} · 完成"
         if summary and not lines:
             lines.append(summary)
-        return title, "\n".join(lines) if lines else f"{task_name}：{event_type}"
+        return title, "\n".join(lines) if lines else f"{task_name}：{event_type}", is_no_update, stats_info
 
 
 plugin = DingdingBotAutomationPlugin()
