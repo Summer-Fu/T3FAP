@@ -1197,12 +1197,15 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         skip_no_update = bool(cfg.get("skip_no_update_notify"))
         is_task_event = event_type.startswith("task.")
         no_update_keywords = (
-            "无更新",       # 标题：xxx · 无更新；其他说明：本次无更新
-            "没有新",       # STRM：没有新的官网条目
-            "没有发现新",    # STRM：没有发现新的条目
-            "全部已存在",    # 转存/下载：0 项（全部已存在）
-            "已存在相同文件", # 转存：本次无更新（已存在相同文件）
-            "待生成 0",      # STRM：本次待生成 0 个
+            "无更新",          # 标题：xxx · 无更新；其他说明：本次无更新
+            "没有新",          # STRM：没有新的官网条目
+            "没有发现新",       # STRM：没有发现新的条目
+            "全部已存在",       # 转存/下载：0 项（全部已存在）
+            "已存在相同文件",    # 转存：本次无更新（已存在相同文件）
+            "待生成 0",         # STRM：本次待生成 0 个
+            "生成 0 个",        # 批量STRM：已生成 0 个文件
+            "没有需要下载",      # 下载任务：没有需要下载的文件
+            "不需要下载",        # 下载任务：不需要下载任何文件
         )
         combined_text = f"{title}\n{content}"
         is_no_update_msg = any(kw in combined_text for kw in no_update_keywords)
