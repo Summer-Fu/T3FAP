@@ -67,28 +67,6 @@ EVENT_CATEGORY = {
     "system.shutdown": "系统关闭",
 }
 
-EVENT_NOTIFY_CONFIG_KEY = {
-    "task.completed": "notify_task_completed",
-    "task.failed": "notify_task_failed",
-    "task.started": "notify_task_started",
-    "task.created": "notify_task_created",
-    "task.canceled": "notify_task_canceled",
-    "task.transfer.post_execute": "notify_task_completed",
-    "task.strm.post_execute": "notify_task_completed",
-    "task.download.post_execute": "notify_task_completed",
-    "task.drive_download.post_execute": "notify_task_completed",
-    "task.video_download.post_execute": "notify_task_completed",
-    "task.short_video.post_execute": "notify_task_completed",
-    "task.drive_cache_keep.post_execute": "notify_task_completed",
-    "task.subscription.post_execute": "notify_task_completed",
-    "task.catalog_batch_strm.post_execute": "notify_task_completed",
-    "task.live_catalog_batch_strm.post_execute": "notify_task_completed",
-    "system.startup": "notify_system_startup",
-    "system.shutdown": "notify_system_shutdown",
-    "plugin.installed": "notify_plugin_installed",
-    "plugin.uninstalled": "notify_plugin_uninstalled",
-}
-
 CATEGORY_EMOJI = {
     "任务完成": "✅",
     "任务失败": "❌",
@@ -167,6 +145,7 @@ TRIGGER_SOURCE_CN = {
 VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv",
     ".m4v", ".mpg", ".mpeg", ".m2ts", ".iso", ".rmvb", ".webm",
+    ".strm",
 }
 
 # 集数提取正则：支持 E01, EP01, 第01集, 01, S01E01 等格式
@@ -1208,18 +1187,19 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             print(f"[钉钉Bot] 事件 {event_type} 不在订阅列表中，仅打印不推送")
             return self._make_result(event_type, "", "", configured, skipped=True)
 
-        # ===== 事件通知开关：根据配置判断是否发送该类事件 =====
-        notify_cfg_key = EVENT_NOTIFY_CONFIG_KEY.get(event_type)
-        if notify_cfg_key and notify_cfg_key in cfg:
-            if not bool(cfg.get(notify_cfg_key)):
-                print(f"[钉钉Bot] 事件 {event_type} 的通知开关已关闭（{notify_cfg_key}=false），跳过推送")
-                return self._make_result(event_type, "", "", configured, skipped=True)
-
         # ===== 所有订阅事件都立即发送（取消合并缓冲，防止STRM等事件被吞掉） =====
         try:
             title, content = self._safe_build_message(event)
         except Exception as exc:
             title, content = f"[{event.get('task_id', '')}] 通知", f"构建消息失败: {exc}"
+
+        # ===== 无更新不推送（总开关） =====
+        skip_no_update = bool(cfg.get("skip_no_update_notify"))
+        is_task_event = event_type.startswith("task.")
+        is_no_update_msg = "无更新" in title or "本次无更新" in content
+        if skip_no_update and is_task_event and is_no_update_msg:
+            print(f"[钉钉Bot] 任务 {execution_id or task_id} 结果为「无更新」，skip_no_update_notify=true，跳过推送")
+            return self._make_result(event_type, title, content, configured, skipped=True)
         if configured:
             # 发送前记录去重信息
             dedup_key = f"{execution_id or task_id}:{event_type}"

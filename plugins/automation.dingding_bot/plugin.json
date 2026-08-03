@@ -1,7 +1,7 @@
 {
   "id": "automation.dingding_bot",
   "name": "钉钉 Bot",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "category": "automation",
   "description": "监听任务和系统事件，通过钉钉群机器人发送通知消息。支持加签安全设置、@指定人。",
   "author": "T3FAP Community",
@@ -30,6 +30,16 @@
       "required": false,
       "default": true,
       "description": "是否启用钉钉 Bot 通知自动化。",
+      "secret": false,
+      "group": "基础设置"
+    },
+    {
+      "key": "skip_no_update_notify",
+      "label": "无更新不推送（总开关）",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "开启后：任务执行结果为「无更新」（即转存/下载/生成STRM全部已存在，没有新内容）时，不发送通知消息。只有产生实际更新的任务才会推送。",
       "secret": false,
       "group": "基础设置"
     },
@@ -72,96 +82,6 @@
       "description": "需要在钉钉消息中 @ 的手机号列表，多个值用英文逗号分隔。",
       "secret": false,
       "group": "通知设置"
-    },
-    {
-      "key": "notify_task_completed",
-      "label": "任务完成通知",
-      "type": "boolean",
-      "required": false,
-      "default": true,
-      "description": "任务执行完成时推送。示例：📊 任务状态：完成/无更新",
-      "secret": false,
-      "group": "事件通知开关"
-    },
-    {
-      "key": "notify_task_failed",
-      "label": "任务失败通知",
-      "type": "boolean",
-      "required": false,
-      "default": true,
-      "description": "任务执行失败时推送（含错误原因）。示例：📊 任务状态：失败",
-      "secret": false,
-      "group": "事件通知开关"
-    },
-    {
-      "key": "notify_task_started",
-      "label": "任务开始通知",
-      "type": "boolean",
-      "required": false,
-      "default": false,
-      "description": "任务开始执行时推送（可能较频繁，建议关闭）。",
-      "secret": false,
-      "group": "事件通知开关"
-    },
-    {
-      "key": "notify_task_created",
-      "label": "任务创建通知",
-      "type": "boolean",
-      "required": false,
-      "default": false,
-      "description": "新任务创建时推送（可能较频繁，建议关闭）。",
-      "secret": false,
-      "group": "事件通知开关"
-    },
-    {
-      "key": "notify_task_canceled",
-      "label": "任务取消通知",
-      "type": "boolean",
-      "required": false,
-      "default": true,
-      "description": "任务被取消时推送。",
-      "secret": false,
-      "group": "事件通知开关"
-    },
-    {
-      "key": "notify_system_startup",
-      "label": "系统启动通知",
-      "type": "boolean",
-      "required": false,
-      "default": true,
-      "description": "平台服务启动时推送，方便感知系统重启。",
-      "secret": false,
-      "group": "事件通知开关"
-    },
-    {
-      "key": "notify_system_shutdown",
-      "label": "系统关闭通知",
-      "type": "boolean",
-      "required": false,
-      "default": true,
-      "description": "平台服务关闭/重启时推送。",
-      "secret": false,
-      "group": "事件通知开关"
-    },
-    {
-      "key": "notify_plugin_installed",
-      "label": "插件安装通知",
-      "type": "boolean",
-      "required": false,
-      "default": true,
-      "description": "有新插件被安装时推送。",
-      "secret": false,
-      "group": "事件通知开关"
-    },
-    {
-      "key": "notify_plugin_uninstalled",
-      "label": "插件卸载通知",
-      "type": "boolean",
-      "required": false,
-      "default": true,
-      "description": "有插件被卸载时推送。",
-      "secret": false,
-      "group": "事件通知开关"
     },
     {
       "key": "show_task_id",
