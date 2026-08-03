@@ -808,7 +808,8 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         if config_changed:
             self._daily_stats_test_done = False  # 配置变了，重置标志，允许再做一次测试推送
             self._daily_stats_test_pending = True
-            print(f"[钉钉Bot][日统计] 配置已变更，待首条任务完成后推送测试统计")
+            self._daily_stats_pushed_times.clear()  # 清空已推送时间点记录，让新配置的时间点可以重新触发
+            print(f"[钉钉Bot][日统计] 配置已变更，已重置推送状态，待首条任务完成后推送测试统计，定时推送时间={normalized.get('daily_stats_push_time', '23:55')}")
 
     def validate_runtime_config(self, config: dict[str, Any]) -> OperationResult:
         normalized = self._normalize_runtime_config(config)
