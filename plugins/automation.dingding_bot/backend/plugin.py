@@ -7,6 +7,7 @@ import json
 import re
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -430,6 +431,9 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         self._daily_stats: dict[str, Any] = {}  # 内存中的统计数据
         self._daily_stats_dirty: bool = False    # 统计数据是否有变更
         self._daily_stats_test_pending: bool = False  # 配置保存后是否需要立即推送统计（用于测试）
+        # ---- 异步发送线程池 ----
+        # 所有钉钉 HTTP 推送都在独立线程池中执行，避免阻塞事件回调线程
+        self._sender_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dingding-sender")
 
     # ==================== 平台本地 API 调用 ====================
 
@@ -1243,18 +1247,14 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         return self._make_result(event_type, title, content, configured)
 
     def _do_send(self, title: str, content: str, event_type: str) -> None:
-        """实际执行钉钉发送。"""
-        try:
-            category = self._category_for(event_type)
-            emoji = CATEGORY_EMOJI.get(category, "🔔")
-            full_title = f"{emoji} {title}"
-            print(f"[钉钉Bot] 准备发送: {full_title}")
-            self._send_to_dingtalk(full_title, content)
-            print(f"[钉钉Bot] 发送成功")
-        except Exception as exc:
-            import traceback
-            print(f"[钉钉Bot] 发送失败: {exc}")
-            traceback.print_exc()
+        """异步提交钉钉发送任务到线程池，不阻塞事件回调线程。"""
+        category = self._category_for(event_type)
+        emoji = CATEGORY_EMOJI.get(category, "🔔")
+        full_title = f"{emoji} {title}"
+        # 捕获当前配置快照，防止异步发送时配置已变更
+        config_snapshot = dict(self._resolve_config())
+        print(f"[钉钉Bot] 异步提交发送: {full_title}")
+        self._sender_executor.submit(self._send_worker, full_title, content, config_snapshot)
 
     # ==================== 日统计功能 ====================
 
@@ -1439,6 +1439,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             return
 
         msg = self._build_daily_stats_message(cfg)
+        config_snapshot = dict(self._resolve_config())
         if msg is None:
             # 两个开关都关闭或者还没有数据，但测试模式下还是推个提示
             if "测试" in reason:
@@ -1450,12 +1451,12 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                     f"  - 当日更新情况推送：{'✅ 开启' if bool(cfg.get('daily_updates_enable')) else '❌ 关闭'}\n"
                     f"\n配置已生效，如有任务完成会自动累计统计。"
                 )
-                self._send_to_dingtalk("📊 钉钉 Bot 日统计测试", test_msg)
-                print(f"[钉钉Bot][日统计] {reason}推送已发送（开关状态提示）")
+                self._sender_executor.submit(self._send_worker, "📊 钉钉 Bot 日统计测试", test_msg, config_snapshot)
+                print(f"[钉钉Bot][日统计] {reason}推送已异步提交（开关状态提示）")
             return
 
-        self._send_to_dingtalk("📊 任务日统计", msg)
-        print(f"[钉钉Bot][日统计] {reason}推送已发送")
+        self._sender_executor.submit(self._send_worker, "📊 任务日统计", msg, config_snapshot)
+        print(f"[钉钉Bot][日统计] {reason}推送已异步提交")
 
     def _make_result(
         self, event_type: str, title: str, content: str,
@@ -1481,6 +1482,17 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         ).model_dump(mode="json")
 
     # ==================== 发送钉钉消息 ====================
+
+    def _send_worker(self, title: str, content: str, config_snapshot: dict[str, Any]) -> None:
+        """线程池中的实际发送逻辑，带完整异常捕获，不影响主流程。"""
+        try:
+            print(f"[钉钉Bot][异步] 开始发送: {title[:50]}")
+            self._send_to_dingtalk(title, content, config_snapshot)
+            print(f"[钉钉Bot][异步] 发送成功: {title[:50]}")
+        except Exception as exc:
+            import traceback
+            print(f"[钉钉Bot][异步] 发送失败: {title[:50]} - {exc}")
+            traceback.print_exc()
 
     def _is_configured(self, config: dict[str, Any] | None = None) -> bool:
         cfg = self._resolve_config(config)
