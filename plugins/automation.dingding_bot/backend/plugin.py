@@ -431,6 +431,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         self._daily_stats: dict[str, Any] = {}  # 内存中的统计数据
         self._daily_stats_dirty: bool = False    # 统计数据是否有变更
         self._daily_stats_test_pending: bool = False  # 配置保存后是否需要立即推送统计（用于测试）
+        self._daily_stats_last_push_date: str | None = None  # 上次日统计推送的日期（YYYY-MM-DD），防止同一天重复推送
         # ---- 异步发送线程池 ----
         # 所有钉钉 HTTP 推送都在独立线程池中执行，避免阻塞事件回调线程
         self._sender_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dingding-sender")
@@ -1422,7 +1423,12 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         return "\n".join(lines)
 
     def _maybe_push_daily_stats(self, cfg: dict[str, Any]) -> None:
-        """检查是否需要推送日统计，需要的话就推送。"""
+        """检查是否需要推送日统计，需要的话就推送。
+
+        触发条件（任一满足即推送）：
+          1. 配置保存后的测试推送（_daily_stats_test_pending）
+          2. 到达每日定时推送时间（daily_stats_push_time），且当天还没推送过
+        """
         should_push = False
         reason = ""
         # 1. 配置保存后的测试推送
@@ -1430,6 +1436,31 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             should_push = True
             reason = "配置保存测试"
             self._daily_stats_test_pending = False
+
+        # 2. 每日定时推送（事件驱动懒检查：每次有事件触发时顺手检查时间）
+        if not should_push:
+            push_time_str = str(cfg.get("daily_stats_push_time") or "23:55").strip()
+            if push_time_str and bool(cfg.get("daily_stats_enable")):
+                try:
+                    now = datetime.now()
+                    today_str = now.strftime("%Y-%m-%d")
+                    # 解析配置的 HH:MM
+                    hour_str, minute_str = push_time_str.split(":")
+                    push_hour = int(hour_str)
+                    push_minute = int(minute_str)
+                    # 当前时间是否已到推送时间
+                    already_past = (
+                        now.hour > push_hour
+                        or (now.hour == push_hour and now.minute >= push_minute)
+                    )
+                    # 今天还没推送过
+                    not_pushed_today = self._daily_stats_last_push_date != today_str
+                    if already_past and not_pushed_today:
+                        should_push = True
+                        reason = "每日定时"
+                except (ValueError, AttributeError):
+                    # 时间格式解析失败就跳过
+                    pass
 
         if not should_push:
             return
@@ -1449,6 +1480,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                     f"当前日统计相关开关：\n"
                     f"  - 任务日统计情况推送：{'✅ 开启' if bool(cfg.get('daily_stats_enable')) else '❌ 关闭'}\n"
                     f"  - 当日更新情况推送：{'✅ 开启' if bool(cfg.get('daily_updates_enable')) else '❌ 关闭'}\n"
+                    f"  - 日统计推送时间：{cfg.get('daily_stats_push_time', '23:55')}\n"
                     f"\n配置已生效，如有任务完成会自动累计统计。"
                 )
                 self._sender_executor.submit(self._send_worker, "📊 钉钉 Bot 日统计测试", test_msg, config_snapshot)
@@ -1456,6 +1488,9 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             return
 
         self._sender_executor.submit(self._send_worker, "📊 任务日统计", msg, config_snapshot)
+        # 记录今日已推送（仅定时推送需要记录，测试推送不占用每日名额）
+        if reason == "每日定时":
+            self._daily_stats_last_push_date = datetime.now().strftime("%Y-%m-%d")
         print(f"[钉钉Bot][日统计] {reason}推送已异步提交")
 
     def _make_result(

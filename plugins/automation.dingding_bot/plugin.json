@@ -104,6 +104,16 @@
       "group": "日统计数据"
     },
     {
+      "key": "daily_stats_push_time",
+      "label": "日统计推送时间",
+      "type": "string",
+      "required": false,
+      "default": "23:55",
+      "description": "每日自动推送日统计的时间（24小时制 HH:MM 格式，例如 23:55）。到点后第一次有任务事件触发时自动推送当日统计。",
+      "secret": false,
+      "group": "日统计数据"
+    },
+    {
       "key": "show_task_id",
       "label": "显示任务ID",
       "type": "boolean",
