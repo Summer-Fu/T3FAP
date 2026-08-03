@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import re
+import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -415,7 +416,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.6.3"
+    plugin_version = "2.7.0"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -438,6 +439,11 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         # ---- 异步发送线程池 ----
         # 所有钉钉 HTTP 推送都在独立线程池中执行，避免阻塞事件回调线程
         self._sender_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dingding-sender")
+        # ---- 日统计独立定时轮询线程 ----
+        # 不依赖任务事件触发，每分钟检查一次是否到达推送时间
+        self._stats_timer_stop = threading.Event()
+        self._stats_timer_thread = threading.Thread(target=self._stats_timer_loop, name="dingding-stats-timer", daemon=True)
+        self._stats_timer_thread.start()
 
     # ==================== 平台本地 API 调用 ====================
 
@@ -1244,6 +1250,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                     latest_update_time=stats_info.get("latest_update_time", ""),
                     latest_episode=stats_info.get("latest_episode", ""),
                     first_run_of_task=stats_info.get("first_run_of_task", False),
+                    error_text=stats_info.get("error_text", ""),
                 )
             except Exception as exc:
                 print(f"[钉钉Bot][日统计] 记录任务失败: {exc}")
@@ -1337,9 +1344,9 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         latest_update_time: str,
         latest_episode: str,
         first_run_of_task: bool,
+        error_text: str,
     ) -> None:
         """记录单条任务到日统计。"""
-        # 只记录完成/失败/无更新状态的（started 和 created 不计入）
         if is_started:
             return
         if not task_type_label:
@@ -1357,25 +1364,32 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 "updated": 0,     # 成功更新（有新内容）
                 "failed": 0,      # 失败
                 "no_update": 0,   # 无更新
-                "updates": [],    # 更新明细（当日更新情况，排除首次转入）
+                "updates": [],    # 更新明细（所有有更新的任务，包括首次转入）
+                "failures": [],   # 失败明细
             }
             stats["by_type"][task_type_label] = type_data
 
         type_data["total"] += 1
         if is_failed:
             type_data["failed"] += 1
+            type_data["failures"].append({
+                "task_id": task_id,
+                "task_name": task_name,
+                "error_text": error_text or "未知错误",
+            })
         elif is_no_update:
             type_data["no_update"] += 1
         else:
             type_data["updated"] += 1
-            # 排除首次转入（内容太多），只记录"当日更新"的情况
-            if not first_run_of_task:
+            # 只要有更新内容就记录（包括首次转入），但首次转入会标注
+            if update_content or latest_episode:
                 type_data["updates"].append({
                     "task_id": task_id,
                     "task_name": task_name,
                     "update_content": update_content,
                     "latest_update_time": latest_update_time,
                     "latest_episode": latest_episode,
+                    "first_run": first_run_of_task,
                 })
 
         self._daily_stats = stats
@@ -1413,7 +1427,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 )
             lines.append("")
 
-        # 当日更新情况（排除首次转入）
+        # 当日更新情况（含首次转入）
         if show_daily_updates:
             lines.append("🆕 当日更新情况：")
             has_any_update = False
@@ -1422,20 +1436,53 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
                 if not updates:
                     continue
                 has_any_update = True
-                for u in updates:
+                lines.append(f"  🏷️ {type_label}（{len(updates)} 个任务有更新）")
+                for idx, u in enumerate(updates, 1):
                     tid = u.get("task_id", "")
                     tname = u.get("task_name", "")
                     ucontent = u.get("update_content", "")
                     utime = u.get("latest_update_time", "")
-                    prefix = f"[{tid}] {tname}" if tid else tname
-                    lines.append(f"  🏷️ {type_label}")
-                    lines.append(f"    📌 {prefix}")
+                    uepisode = u.get("latest_episode", "")
+                    first_run = bool(u.get("first_run", False))
+                    prefix_parts = []
+                    if tid:
+                        prefix_parts.append(f"[{tid}]")
+                    prefix_parts.append(tname or "未知任务")
+                    if first_run:
+                        prefix_parts.append("（首次转入）")
+                    prefix = " ".join(prefix_parts)
+                    lines.append(f"    {idx}. {prefix}")
                     if ucontent:
-                        lines.append(f"    📝 更新内容：{ucontent}")
+                        lines.append(f"       📝 更新内容：{ucontent}")
+                    if uepisode:
+                        lines.append(f"       🎬 最新剧集：{uepisode}")
                     if utime:
-                        lines.append(f"    🕐 最新更新时间：{utime}")
+                        lines.append(f"       🕐 更新时间：{utime}")
             if not has_any_update:
                 lines.append("  （今日暂无非首次的更新记录）")
+            lines.append("")
+
+        # 失败任务情况
+        any_failures = False
+        for type_label, type_data in sorted(by_type.items()):
+            failures = type_data.get("failures", [])
+            if failures:
+                any_failures = True
+                break
+        if any_failures:
+            lines.append("❌ 失败任务：")
+            for type_label, type_data in sorted(by_type.items()):
+                failures = type_data.get("failures", [])
+                if not failures:
+                    continue
+                lines.append(f"  🏷️ {type_label}（{len(failures)} 个任务失败）")
+                for idx, f in enumerate(failures, 1):
+                    tid = f.get("task_id", "")
+                    tname = f.get("task_name", "")
+                    err = f.get("error_text", "未知错误")
+                    prefix = f"[{tid}] {tname}" if tid else tname
+                    lines.append(f"    {idx}. {prefix}")
+                    lines.append(f"       💥 失败原因：{err}")
 
         return "\n".join(lines)
 
@@ -1522,6 +1569,22 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
         self._sender_executor.submit(self._send_worker, "📊 任务日统计", msg, config_snapshot)
         print(f"[钉钉Bot][日统计] {reason}推送已异步提交")
+
+    def _stats_timer_loop(self) -> None:
+        """独立定时轮询线程：每分钟检查一次是否到达日统计推送时间。
+        不依赖任务事件触发，确保即使没有任务发生也能按时推送。
+        """
+        import time as _time
+        print(f"[钉钉Bot][日统计] 独立定时轮询线程已启动（每30秒检查一次推送时间）")
+        while not self._stats_timer_stop.is_set():
+            try:
+                cfg = self._resolve_config()
+                if bool(cfg.get("daily_stats_enable")) or bool(cfg.get("daily_updates_enable")):
+                    self._maybe_push_daily_stats(cfg)
+            except Exception as exc:
+                print(f"[钉钉Bot][日统计] 定时轮询异常: {exc}")
+            # 每 30 秒检查一次
+            self._stats_timer_stop.wait(30)
 
     def _make_result(
         self, event_type: str, title: str, content: str,
@@ -2392,6 +2455,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             "latest_update_time": latest_episode_update_time or "",
             "latest_episode": latest_episode_name,
             "first_run_of_task": first_run_of_task,
+            "error_text": error_text or "",
         }
 
         # 状态显示
