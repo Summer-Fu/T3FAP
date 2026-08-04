@@ -416,7 +416,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.7.1"
+    plugin_version = "2.7.2"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -1133,7 +1133,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             if is_complete or age > wait_window:
                 merged_event = buf.get("event", {})
                 try:
-                    title, content = self._safe_build_message(merged_event)
+                    title, content, _no_update, _stats = self._safe_build_message(merged_event)
                     results.append((title, content))
                     self._sent_tasks.add(key)
                     done_keys.append(key)
@@ -1511,7 +1511,8 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
             self._daily_stats_test_done = True
 
         # 2. 每日定时推送（支持多个时间点，逗号/顿号/分号分隔）
-        if not should_push and bool(cfg.get("daily_stats_enable")):
+        # 只要日统计或当日更新任一开关开启，就检查定时时间
+        if not should_push and (bool(cfg.get("daily_stats_enable")) or bool(cfg.get("daily_updates_enable"))):
             push_time_raw = str(cfg.get("daily_stats_push_time") or "23:55").strip()
             # 兼容多种分隔符：, 、 ; 以及空格，兼容 08-30 写法
             import re as _re
