@@ -416,7 +416,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.7.2"
+    plugin_version = "2.7.3"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -436,6 +436,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         self._daily_stats_last_push_date: str | None = None  # 上次日统计推送的日期（YYYY-MM-DD），防止同一天重复推送
         self._daily_stats_pushed_times: set[str] = set()  # 今日已推送过的时间点（HH:MM 集合），支持多个推送时间
         self._last_config_hash: str | None = None  # 上次配置的哈希，用于检测配置是否真的变更
+        self._stats_lock = threading.Lock()  # 保护日统计推送状态，防止多线程重复推送
         # ---- 异步发送线程池 ----
         # 所有钉钉 HTTP 推送都在独立线程池中执行，避免阻塞事件回调线程
         self._sender_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dingding-sender")
@@ -1493,53 +1494,56 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
           1. 配置保存后的测试推送（_daily_stats_test_pending）—— 只推一次
           2. 到达任一每日定时推送时间（支持多个，如 08:30,20:00）—— 每天每个时间点只推一次
         """
-        should_push = False
-        reason = ""
         now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
 
-        # 跨天清零：今日已推送时间点集合
-        if self._daily_stats_last_push_date != today_str:
-            self._daily_stats_pushed_times.clear()
-            self._daily_stats_last_push_date = today_str
+        # 加锁保护：防止定时线程和事件线程同时进入导致重复推送
+        with self._stats_lock:
+            should_push = False
+            reason = ""
+            today_str = now.strftime("%Y-%m-%d")
 
-        # 1. 配置保存后的测试推送（只推一次）
-        if self._daily_stats_test_pending:
-            should_push = True
-            reason = "配置保存测试"
-            self._daily_stats_test_pending = False
-            self._daily_stats_test_done = True
+            # 跨天清零：今日已推送时间点集合
+            if self._daily_stats_last_push_date != today_str:
+                self._daily_stats_pushed_times.clear()
+                self._daily_stats_last_push_date = today_str
 
-        # 2. 每日定时推送（支持多个时间点，逗号/顿号/分号分隔）
-        # 只要日统计或当日更新任一开关开启，就检查定时时间
-        if not should_push and (bool(cfg.get("daily_stats_enable")) or bool(cfg.get("daily_updates_enable"))):
-            push_time_raw = str(cfg.get("daily_stats_push_time") or "23:55").strip()
-            # 兼容多种分隔符：, 、 ; 以及空格，兼容 08-30 写法
-            import re as _re
-            time_candidates = [
-                t.strip().replace("-", ":")
-                for t in _re.split(r"[,、;；\s]+", push_time_raw)
-                if t.strip()
-            ]
-            for t in time_candidates:
-                try:
-                    hour_str, minute_str = t.split(":")
-                    push_hour = int(hour_str)
-                    push_minute = int(minute_str)
-                    already_past = (
-                        now.hour > push_hour
-                        or (now.hour == push_hour and now.minute >= push_minute)
-                    )
-                    # 该时间点今天还没推送过
-                    not_pushed = t not in self._daily_stats_pushed_times
-                    if already_past and not_pushed:
-                        should_push = True
-                        reason = f"每日定时（{t}）"
-                        self._daily_stats_pushed_times.add(t)
-                        break
-                except (ValueError, AttributeError):
-                    # 时间格式解析失败就跳过
-                    continue
+            # 1. 配置保存后的测试推送（只推一次）
+            if self._daily_stats_test_pending:
+                should_push = True
+                reason = "配置保存测试"
+                self._daily_stats_test_pending = False
+                self._daily_stats_test_done = True
+
+            # 2. 每日定时推送（支持多个时间点，逗号/顿号/分号分隔）
+            # 只要日统计或当日更新任一开关开启，就检查定时时间
+            if not should_push and (bool(cfg.get("daily_stats_enable")) or bool(cfg.get("daily_updates_enable"))):
+                push_time_raw = str(cfg.get("daily_stats_push_time") or "23:55").strip()
+                # 兼容多种分隔符：, 、 ; 以及空格，兼容 08-30 写法
+                import re as _re
+                time_candidates = [
+                    t.strip().replace("-", ":")
+                    for t in _re.split(r"[,、;；\s]+", push_time_raw)
+                    if t.strip()
+                ]
+                for t in time_candidates:
+                    try:
+                        hour_str, minute_str = t.split(":")
+                        push_hour = int(hour_str)
+                        push_minute = int(minute_str)
+                        already_past = (
+                            now.hour > push_hour
+                            or (now.hour == push_hour and now.minute >= push_minute)
+                        )
+                        # 该时间点今天还没推送过
+                        not_pushed = t not in self._daily_stats_pushed_times
+                        if already_past and not_pushed:
+                            should_push = True
+                            reason = f"每日定时（{t}）"
+                            self._daily_stats_pushed_times.add(t)
+                            break
+                    except (ValueError, AttributeError):
+                        # 时间格式解析失败就跳过
+                        continue
 
         if not should_push:
             return
@@ -2379,6 +2383,9 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
         stat_line = "｜".join(stat_parts) if stat_parts else ""
 
+        # 提前判断状态（所有计数变量都已确定）
+        is_failed = event_type == "task.failed" or status == "failed" or (error_text and not saved_count and not generated_item_count)
+
         # 判断是否无更新（失败任务永远不算无更新！）
         is_no_update = False
         if not is_failed:
@@ -2416,8 +2423,7 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
         # 任务类型标签（更友好的显示）
         type_display = task_type_label or "未知任务"
 
-        # 判断状态
-        is_failed = event_type == "task.failed" or status == "failed" or (error_text and not saved_count and not generated_item_count)
+        # 判断状态（is_failed 已在所有计数变量确定后提前定义）
         is_started = event_type == "task.started"
         is_no_update = bool(is_no_update)
 
