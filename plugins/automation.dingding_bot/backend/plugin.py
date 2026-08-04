@@ -416,7 +416,7 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
     plugin_id = "automation.dingding_bot"
     plugin_name = "钉钉 Bot"
-    plugin_version = "2.7.0"
+    plugin_version = "2.7.1"
 
     def __init__(self) -> None:
         self._runtime_config: dict[str, Any] = {}
@@ -2378,40 +2378,34 @@ class DingdingBotAutomationPlugin(AutomationProvider, BasePlugin):
 
         stat_line = "｜".join(stat_parts) if stat_parts else ""
 
-        # 判断是否无更新（数据标志判断 + summary 关键词兜底，任一命中即算无更新）
+        # 判断是否无更新（失败任务永远不算无更新！）
         is_no_update = False
-        # 1) 数据标志判断：计数为 0 且有跳过/无更新天数
-        if (
-            (saved_count is not None and saved_count == 0)
-            or (transferred_count is not None and transferred_count == 0)
-            or (generated_item_count is not None and generated_item_count == 0)
-        ) and (
-            (skipped_count is not None and skipped_count > 0)
-            or (no_update_days is not None and no_update_days > 0)
-        ):
-            is_no_update = True
-        # 2) summary/detail_message 关键词兜底：平台已明确说明"没有新的/无需生成/无更新"
-        # （summary 里有就从 summary 判断，detail_message 也可能包含（会显示为"其他说明"）
-        if not is_no_update:
-            no_update_keywords = (
-                "没有新的官网条目",
-                "没有需要下载的文件",
-                "没有需要转存的文件",
-                "没有新的内容",
-                "没有新内容",
-                "无需生成",
-                "无更新",
-                "没有更新",
-                "没有新",
-                "无需处理",
-                "已全部存在",
-                "均已存在",
-                "已存在",
-                "没有缺失",
-            )
-            keyword_text = " ".join(x for x in (summary, detail_message) if x)
-            if keyword_text and any(kw in keyword_text for kw in no_update_keywords):
+        if not is_failed:
+            # 1) 数据标志判断：计数为 0 且有跳过/无更新天数
+            if (
+                (saved_count is not None and saved_count == 0)
+                or (transferred_count is not None and transferred_count == 0)
+                or (generated_item_count is not None and generated_item_count == 0)
+            ) and (
+                (skipped_count is not None and skipped_count > 0)
+                or (no_update_days is not None and no_update_days > 0)
+            ):
                 is_no_update = True
+            # 2) summary/detail_message 关键词兜底：平台已明确说明"没有新的/无需生成/无更新"
+            if not is_no_update:
+                no_update_keywords = (
+                    "没有新的官网条目",
+                    "没有需要下载的文件",
+                    "没有需要转存的文件",
+                    "没有新的内容需要",
+                    "无需生成新",
+                    "无更新（已存在相同文件）",
+                    "没有缺失的本地",
+                    "没有新的缺失",
+                )
+                keyword_text = " ".join(x for x in (summary, detail_message) if x)
+                if keyword_text and any(kw in keyword_text for kw in no_update_keywords):
+                    is_no_update = True
 
         # ==================== 按移动端友好简洁模板构建消息 ====================
 
